@@ -1,0 +1,65 @@
+# ============================================================
+# Caddyfile.example — Caddy reverse proxy configuration
+# Author: Ali Boussecsou — ali-n8n.com
+#
+# Replace all occurrences of:
+#   your-domain.com      → your actual domain
+#   your-subdomain.com   → your subdomain (or remove the second
+#                          block entirely if unused)
+#
+# Caddy handles SSL automatically via Let's Encrypt / ZeroSSL.
+# No certificate configuration needed.
+# ============================================================
+
+your-domain.com {
+    # Reverse proxy to n8n container
+    reverse_proxy n8n-container:5678 {
+        flush_interval -1
+
+        # Pass real client IP to n8n
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+
+        # Required for n8n websockets (canvas real-time updates)
+        transport http {
+            read_timeout  0s
+            write_timeout 0s
+        }
+    }
+
+    # Security headers
+    header {
+        # Force HTTPS for 1 year, including subdomains
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+        # Prevent clickjacking
+        X-Frame-Options "SAMEORIGIN"
+
+        # Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+
+        # Control referrer information
+        Referrer-Policy "strict-origin-when-cross-origin"
+
+        # Restrict browser feature access
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+
+        # Remove server version header
+        -Server
+    }
+}
+
+# ── OPTIONAL: second subdomain (e.g. AI gateway) ──────────
+# Remove this block if you don't have a second service.
+your-subdomain.com {
+    reverse_proxy host.docker.internal:18789
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+}

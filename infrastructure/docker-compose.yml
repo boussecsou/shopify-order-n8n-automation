@@ -1,0 +1,94 @@
+# ============================================================
+# docker-compose.yml — n8n Automation Stack
+# Author: Ali Boussecsou — ali-n8n.com
+#
+# Services:
+#   caddy     — reverse proxy + automatic SSL (Let's Encrypt)
+#   n8n       — automation engine (Enterprise)
+#   redis     — state management (sinceId cursor, sheet name)
+#
+# All services run on the same bridge network (n8n_network).
+# No service ports are exposed directly except through Caddy.
+# ============================================================
+
+services:
+
+  # ── CADDY ────────────────────────────────────────────────
+  caddy:
+    image: caddy:latest
+    container_name: caddy-proxy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./caddy_data:/data
+      - ./caddy_config:/config
+    networks:
+      - n8n_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── N8N ──────────────────────────────────────────────────
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:stable
+    container_name: n8n-container
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 256m
+    environment:
+      # Core
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_LICENSE_ACTIVATION_KEY=${N8N_LICENSE_ACTIVATION_KEY}
+      - N8N_HOST=ali-n8n.com               # Replace with your domain
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://ali-n8n.com/   # Replace with your domain
+      - GENERIC_TIMEZONE=Europe/Paris       # Replace with your timezone
+      # Security
+      - N8N_PROXY_TRUST_MODE=all
+      - N8N_RESTRICT_FILE_ACCESS_TO=${N8N_RESTRICT_FILE_ACCESS_TO}
+      - N8N_ALLOWED_ORIGINS=https://ali-n8n.com  # Replace with your domain
+      - N8N_EDITOR_BASE_URL=https://ali-n8n.com  # Required for execution links in error emails
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - /home/adlin/metrics:/data/metrics:ro     # VPS metrics — read-only
+    networks:
+      - n8n_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── REDIS ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis-container
+    restart: always
+    networks:
+      - n8n_network
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - /root/n8n-automation/redis_data:/data
+
+# ── NETWORK ───────────────────────────────────────────────
+networks:
+  n8n_network:
+    driver: bridge
