@@ -205,7 +205,7 @@ If the backup fails, the update is aborted — the production instance is never 
 
 If you discover a security vulnerability in this project, please report it privately:
 
-**Email:** aliboussechill@gmail.com  
+**Email:** me@ali-n8n.com  
 **Subject:** `[SECURITY] shopify-order-n8n-automation`
 
 Do not open a public GitHub issue for security vulnerabilities.
