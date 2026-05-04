@@ -1,0 +1,651 @@
+{
+  "name": "wf-04-vps-ai-monitoring",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        448
+      ],
+      "id": "54761017-6b12-4f52-a029-e7fcf86cbea2",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/metrics/vps_metrics.json",
+        "options": {
+          "dataPropertyName": "vps-metrics"
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        560
+      ],
+      "id": "02e4ada6-063e-4f3a-b053-b15ddab9150f",
+      "name": "Read VPS Metrics",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "fromJson",
+        "binaryPropertyName": "vps-metrics",
+        "destinationKey": "response",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        560
+      ],
+      "id": "a880cba9-d4b0-4eff-a167-da1598510044",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "resource": "vpsBackups",
+        "virtualMachineId": "1101276"
+      },
+      "type": "n8n-nodes-hostinger-api.hostingerApi",
+      "typeVersion": 1,
+      "position": [
+        464,
+        560
+      ],
+      "id": "43b26f44-b086-4996-be84-e925e597f504",
+      "name": "List VPS backups",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "hostingerApi": {
+          "id": "Mf5RaLRcy614tapT",
+          "name": "Hostinger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "virtualMachineId": "1101276"
+      },
+      "type": "n8n-nodes-hostinger-api.hostingerApi",
+      "typeVersion": 1,
+      "position": [
+        688,
+        560
+      ],
+      "id": "f3a0cd21-6ddc-46c4-b6fc-5d33359224b7",
+      "name": "Get Generic VPS Information",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "hostingerApi": {
+          "id": "Mf5RaLRcy614tapT",
+          "name": "Hostinger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "vpsMonarx",
+        "virtualMachineId": "1101276"
+      },
+      "type": "n8n-nodes-hostinger-api.hostingerApi",
+      "typeVersion": 1,
+      "position": [
+        928,
+        560
+      ],
+      "id": "777faa26-f5e9-42bc-a892-126ed450ac01",
+      "name": "Get Generic Monarx Information",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "hostingerApi": {
+          "id": "Mf5RaLRcy614tapT",
+          "name": "Hostinger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Build VPS Report — Code Node (WF-04)\n// Architecture: named node references $('node') — no Merge node needed\n// Sources:\n//   - Extract from File              → bash metrics (vps_metrics.json)\n//   - List VPS backups               → Hostinger snapshots\n//   - Get Generic VPS Information    → Hostinger VPS state\n//   - Get Generic Monarx Information → security scan\n// Author: Ali Boussecsou — ali-n8n.com\n// ============================================================\n\n// ─── DATA EXTRACTION ──────────────────────────────────────\n// Each node is referenced by its EXACT name, not by index.\n// Benefit: stable even if connections are reorganized in n8n.\n// If a node is renamed in n8n, update the reference here too.\n\nconst localMetrics = $('Extract from File').first().json.response;\nconst backupsData  = $('List VPS backups').first().json.response;\nconst vpsInfo      = $('Get Generic VPS Information').first().json.response;\nconst monarxData   = $('Get Generic Monarx Information').first().json.response;\n\n// ─── DATA FRESHNESS CHECK ─────────────────────────────────\n// IMPORTANT: this check must come AFTER localMetrics is declared.\n//\n// generated_at is written by vps_metrics.sh on each run.\n// If this field is older than 30 minutes, the script likely\n// did not run this morning (missed cron, permissions, server reboot...).\n// An explicit error is thrown — WF-03 catches it automatically\n// and sends a Gmail alert with the message below.\n\nconst generatedAt = new Date(localMetrics.generated_at);\nconst ageMinutes  = (Date.now() - generatedAt.getTime()) / (1000 * 60);\n\nif (ageMinutes > 30) {\n  throw new Error(\n    `WF-04 — Stale bash data (${Math.round(ageMinutes)} min). ` +\n    `vps_metrics.sh likely did not run this morning. ` +\n    `Check: /home/adlin/metrics/vps_metrics.log`\n  );\n}\n\n// ─── HOSTINGER BACKUPS ────────────────────────────────────\nconst snapshots    = backupsData?.data || [];\nconst lastSnapshot = snapshots[0] || null;\n\nconst lastSnapshotDate = lastSnapshot\n  ? new Date(lastSnapshot.created_at).toLocaleDateString('en-GB', {\n      day: '2-digit', month: 'long', year: 'numeric',\n      hour: '2-digit', minute: '2-digit'\n    })\n  : 'No snapshot available';\n\nconst lastSnapshotSize = lastSnapshot\n  ? (lastSnapshot.size / 1024 / 1024).toFixed(1) + ' GB'\n  : 'N/A';\n\n// Snapshot age in days — alert if > 8 days\nconst snapshotAgeDays = lastSnapshot\n  ? Math.floor((Date.now() - new Date(lastSnapshot.created_at)) / (1000 * 60 * 60 * 24))\n  : 99;\n\n// ─── HOSTINGER VPS ────────────────────────────────────────\nconst vpsState = vpsInfo?.state           || 'unknown';\nconst vpsplan  = vpsInfo?.plan            || 'N/A';\nconst ipPublic = vpsInfo?.ipv4?.[0]?.address || 'N/A';\n\n// ─── MONARX ───────────────────────────────────────────────\n// scan_ended_at === null means scan is still running\nconst scanStatus  = monarxData?.scan_ended_at === null ? 'In progress' : 'Completed';\nconst malicious   = monarxData?.malicious   || 0;\nconst compromised = monarxData?.compromised || 0;\n\n// ─── LOCAL METRICS (bash script) ──────────────────────────\nconst sys        = localMetrics?.system     || {};\nconst res        = localMetrics?.resources  || {};\nconst containers = localMetrics?.containers || [];\nconst backup     = localMetrics?.backup     || {};\nconst services   = localMetrics?.services   || {};\nconst n8nInfo    = localMetrics?.n8n        || {};\n\n// RAM and disk calculations\nconst diskPct    = parseInt(res.disk_percent) || 0;\nconst ramPct     = Math.round((res.ram_used_mb / res.ram_total_mb) * 100);\nconst ramUsedGB  = (res.ram_used_mb  / 1024).toFixed(1);\nconst ramTotalGB = (res.ram_total_mb / 1024).toFixed(1);\n\n// ─── N8N INFO ─────────────────────────────────────────────\nconst n8nVersion      = n8nInfo.version             || 'unknown';\nconst n8nUpdateDate   = n8nInfo.last_update_date    || 'N/A';\nconst n8nUpdateStatus = n8nInfo.last_update_status  || 'unknown';\nconst n8nUpdateMsg    = n8nInfo.last_update_message || 'No details available';\n\n// ─── ALERT LOGIC ──────────────────────────────────────────\n// Each critical condition appends an entry to the alerts array.\n// This array drives both the report header color and email subject.\nconst alerts = [];\n\nif (diskPct >= 80)\n  alerts.push('🔴 Disk critical: ' + diskPct + '%');\n\nif (ramPct >= 85)\n  alerts.push('🔴 RAM critical: ' + ramPct + '%');\n\nif (sys.reboot_required)\n  alerts.push('🟡 Server reboot required');\n\nif (sys.updates_pending > 20)\n  alerts.push('🟡 ' + sys.updates_pending + ' pending OS updates');\n\nif (snapshotAgeDays > 8)\n  alerts.push('🔴 Last Hostinger snapshot is ' + snapshotAgeDays + ' day(s) old');\n\nif (malicious > 0)\n  alerts.push('🔴 MALWARE DETECTED: ' + malicious + ' file(s)');\n\nif (backup.status !== 'ok')\n  alerts.push('🔴 n8n backup failed');\n\nif (n8nUpdateStatus === 'failed')\n  alerts.push('🔴 Last n8n update failed — check logs');\n\ncontainers.forEach(c => {\n  if (!c.status.startsWith('Up'))\n    alerts.push('🔴 Container DOWN: ' + c.name);\n});\n\nconst hasAlerts    = alerts.length > 0;\nconst reportColor  = hasAlerts ? '#e74c3c' : '#27ae60';\nconst reportStatus = hasAlerts ? '⚠️ ACTION REQUIRED' : '✅ ALL SYSTEMS NOMINAL';\nconst emailSubject = hasAlerts\n  ? '🔴 VPS Alert — ali-n8n.com — ' + alerts.length + ' issue(s)'\n  : '✅ VPS Daily Report — ali-n8n.com — Nominal';\n\n// ─── HTML: CONTAINERS ─────────────────────────────────────\nconst containersHTML = containers.map(c => {\n  const isUp        = c.status.startsWith('Up');\n  const statusColor = isUp ? '#27ae60' : '#e74c3c';\n  const statusIcon  = isUp ? '✅' : '🔴';\n  return `\n    <tr>\n      <td style=\"padding:8px 12px;border-bottom:1px solid #ecf0f1;\">${statusIcon} ${c.name}</td>\n      <td style=\"padding:8px 12px;border-bottom:1px solid #ecf0f1;color:${statusColor};font-weight:bold;\">${c.status}</td>\n      <td style=\"padding:8px 12px;border-bottom:1px solid #ecf0f1;color:#7f8c8d;font-size:12px;\">${c.image}</td>\n    </tr>`;\n}).join('');\n\n// ─── HTML: ALERTS ──────────────────────────────────────────\nconst alertsHTML = hasAlerts\n  ? alerts.map(a => `<li style=\"margin:4px 0;color:#c0392b;\">${a}</li>`).join('')\n  : '<li style=\"color:#27ae60;\">No alerts — all systems nominal</li>';\n\n// ─── HTML: N8N UPDATE STATUS ──────────────────────────────\nconst n8nUpdateColor = n8nUpdateStatus === 'ok'\n  ? '#27ae60'\n  : n8nUpdateStatus === 'failed'\n    ? '#e74c3c'\n    : '#7f8c8d';\n\nconst n8nUpdateIcon = n8nUpdateStatus === 'ok'\n  ? '✅'\n  : n8nUpdateStatus === 'failed'\n    ? '🔴'\n    : '⚪';\n\n// ─── REPORT TIMESTAMP ─────────────────────────────────────\nconst now = new Date().toLocaleDateString('en-GB', {\n  weekday: 'long', day: '2-digit', month: 'long', year: 'numeric',\n  hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris'\n});\n\n// ─── HTML REPORT ──────────────────────────────────────────\nconst html = `\n<!DOCTYPE html>\n<html>\n<head><meta charset=\"UTF-8\"></head>\n<body style=\"font-family:Arial,sans-serif;background:#f5f6fa;margin:0;padding:20px;\">\n\n  <div style=\"max-width:680px;margin:0 auto;background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,0.1);\">\n\n    <!-- HEADER -->\n    <div style=\"background:${reportColor};padding:24px 30px;color:white;\">\n      <h1 style=\"margin:0;font-size:22px;\">🖥️ VPS Health Report</h1>\n      <p style=\"margin:6px 0 0;opacity:0.9;font-size:14px;\">ali-n8n.com — ${now}</p>\n      <p style=\"margin:8px 0 0;font-size:18px;font-weight:bold;\">${reportStatus}</p>\n    </div>\n\n    <div style=\"padding:24px 30px;\">\n\n      <!-- ACTIVE ALERTS -->\n      <div style=\"background:${hasAlerts ? '#fdf2f2' : '#f0fdf4'};border-left:4px solid ${reportColor};padding:12px 16px;border-radius:4px;margin-bottom:24px;\">\n        <strong>Active alerts</strong>\n        <ul style=\"margin:8px 0 0;padding-left:20px;\">\n          ${alertsHTML}\n        </ul>\n      </div>\n\n      <!-- SECTION: HOSTINGER INFRASTRUCTURE -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">☁️ Hostinger Infrastructure</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;width:40%;\">VPS State</td>\n          <td style=\"padding:8px 12px;color:${vpsState === 'running' ? '#27ae60' : '#e74c3c'};font-weight:bold;\">${vpsState === 'running' ? '✅ Running' : '🔴 ' + vpsState}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Plan</td>\n          <td style=\"padding:8px 12px;\">${vpsplan}</td>\n        </tr>\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;\">Public IP</td>\n          <td style=\"padding:8px 12px;font-family:monospace;\">${ipPublic}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Last snapshot</td>\n          <td style=\"padding:8px 12px;\">${lastSnapshotDate} (${lastSnapshotSize}) — ${snapshotAgeDays} day(s) ago</td>\n        </tr>\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;\">Total snapshots</td>\n          <td style=\"padding:8px 12px;\">${snapshots.length} snapshot(s) available</td>\n        </tr>\n      </table>\n\n      <!-- SECTION: SYSTEM -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">⚙️ System</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;width:40%;\">Kernel</td>\n          <td style=\"padding:8px 12px;font-family:monospace;\">${sys.kernel}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Uptime</td>\n          <td style=\"padding:8px 12px;\">${sys.uptime}</td>\n        </tr>\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;\">Pending updates</td>\n          <td style=\"padding:8px 12px;color:${sys.updates_pending > 20 ? '#e67e22' : '#27ae60'};\">${sys.updates_pending}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Reboot required</td>\n          <td style=\"padding:8px 12px;color:${sys.reboot_required ? '#e74c3c' : '#27ae60'};\">${sys.reboot_required ? '🔴 Yes' : '✅ No'}</td>\n        </tr>\n      </table>\n\n      <!-- SECTION: RESOURCES -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">📊 Resources</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;width:40%;\">Disk</td>\n          <td style=\"padding:8px 12px;color:${diskPct >= 80 ? '#e74c3c' : diskPct >= 60 ? '#e67e22' : '#27ae60'};\">${res.disk_used} / ${res.disk_total} (${res.disk_percent})</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">RAM</td>\n          <td style=\"padding:8px 12px;color:${ramPct >= 85 ? '#e74c3c' : ramPct >= 70 ? '#e67e22' : '#27ae60'};\">${ramUsedGB} GB / ${ramTotalGB} GB (${ramPct}%)</td>\n        </tr>\n      </table>\n\n      <!-- SECTION: DOCKER CONTAINERS -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">🐳 Docker Containers</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#2c3e50;color:white;\">\n          <th style=\"padding:8px 12px;text-align:left;\">Container</th>\n          <th style=\"padding:8px 12px;text-align:left;\">Status</th>\n          <th style=\"padding:8px 12px;text-align:left;\">Image</th>\n        </tr>\n        ${containersHTML}\n      </table>\n\n      <!-- SECTION: BACKUP & SECURITY -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">🔐 Backup & Security</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;width:40%;\">n8n Backup</td>\n          <td style=\"padding:8px 12px;color:${backup.status === 'ok' ? '#27ae60' : '#e74c3c'};\">${backup.status === 'ok' ? '✅ OK' : '🔴 Failed'} — ${backup.last_backup}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Fail2Ban</td>\n          <td style=\"padding:8px 12px;color:${services.fail2ban === 'active' ? '#27ae60' : '#e74c3c'};\">${services.fail2ban === 'active' ? '✅ Active' : '🔴 Inactive'}</td>\n        </tr>\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;\">Monarx Scan</td>\n          <td style=\"padding:8px 12px;color:${malicious > 0 ? '#e74c3c' : '#27ae60'};\">${malicious > 0 ? '🔴 ' + malicious + ' malware(s) detected' : '✅ Clean'} — Scan ${scanStatus}</td>\n        </tr>\n      </table>\n\n      <!-- SECTION: N8N -->\n      <h2 style=\"color:#2c3e50;font-size:16px;border-bottom:2px solid #ecf0f1;padding-bottom:8px;\">🤖 n8n</h2>\n      <table style=\"width:100%;border-collapse:collapse;margin-bottom:24px;\">\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;width:40%;\">Current version</td>\n          <td style=\"padding:8px 12px;font-family:monospace;\">v${n8nVersion}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Last update</td>\n          <td style=\"padding:8px 12px;\">${n8nUpdateDate}</td>\n        </tr>\n        <tr style=\"background:#f8f9fa;\">\n          <td style=\"padding:8px 12px;font-weight:bold;\">Update status</td>\n          <td style=\"padding:8px 12px;color:${n8nUpdateColor};font-weight:bold;\">${n8nUpdateIcon} ${n8nUpdateStatus}</td>\n        </tr>\n        <tr>\n          <td style=\"padding:8px 12px;font-weight:bold;\">Details</td>\n          <td style=\"padding:8px 12px;color:#7f8c8d;font-size:12px;\">${n8nUpdateMsg}</td>\n        </tr>\n      </table>\n\n    </div>\n\n    <!-- FOOTER -->\n    <div style=\"background:#2c3e50;padding:16px 30px;color:#95a5a6;font-size:12px;text-align:center;\">\n      Automatically generated by n8n — ali-n8n.com<br>\n      Bash data: ${localMetrics.generated_at} | Report sent: ${now}\n    </div>\n\n  </div>\n\n</body>\n</html>`;\n\n// ─── OUTPUT ───────────────────────────────────────────────\nreturn [{\n  json: {\n    subject:    emailSubject,\n    html:       html,\n    hasAlerts:  hasAlerts,\n    alertCount: alerts.length\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        816
+      ],
+      "id": "59d664ab-7bd2-4122-939e-68d4fcb1235c",
+      "name": "Build VPS Report"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "ali-n8n.com Reporting & Monitoring"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        816
+      ],
+      "id": "c1922fac-0094-4e3a-9675-7113b8f8e3e0",
+      "name": "Send VPS Report",
+      "webhookId": "7cf2fb46-6676-4984-9e2c-e8fe2110c8c2",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 7,
+              "triggerAtMinute": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -256,
+        672
+      ],
+      "id": "b541a181-a0d3-4776-a99c-a23deadb6dc4",
+      "name": "Every day at 7:10am"
+    },
+    {
+      "parameters": {
+        "content": "# WF-04 — VPS & AI Infrastructure Monitoring\n\n## Purpose\nCentralized health monitoring for the ali-n8n.com production stack.\nCovers server resources, security posture, backup integrity, and AI API budget.\nDelivers a daily HTML report via Gmail + real-time credit alerts.\n\n## Architecture — Two Independent Tracks\n\n### Track A — Daily System Health Audit (07:10 AM)\nTriggered daily at 07:10 AM — 10min offset after the bash cron job at 07:00 AM.\nSee \"Schedule and Timing\" sticky for rationale.\n\nData sources (single parallel pass):\n  • vps_metrics.json  → local bash script (disk, RAM, Docker, backup, n8n)\n  • Hostinger API     → VPS state, plan, public IP\n  • Hostinger API     → snapshot history & age\n  • Hostinger API     → Monarx malware scan results\n\nAll data evaluated in Build VPS Report against fixed thresholds.\n→ See \"Build VPS Report — Code Node\" sticky for threshold details.\n\nOutput: styled HTML email\n  ✅ Green header — all checks nominal\n  🔴 Red header   — one or more alerts\n\n### Track B — Hourly AI Credit Watch (every 2 hours)\nPolls GET https://openrouter.ai/api/v1/credits every 2 hours.\nremaining_balance = total_credits − total_usage\nAlert fires only when balance < $2.00 — silent when healthy.\n\n  balance < $2.00 → Gmail alert → Telegram (disabled) → StopAndError\n  balance ≥ $2.00 → silent exit\n\n⚠️ Alert fires every 2 hours while balance stays low.\n   Add a Redis cooldown flag if alert spam becomes an issue.\n\n## Error Handling\nCritical nodes        : retryOnFail (3 attempts, 5s delay)\nGmail nodes           : onError continueErrorOutput → StopAndError\nGlobal error workflow : gvhDaCea1oROHUrb\nData freshness guard  : vps_metrics.json older than 30min → immediate throw\n                        → no report sent → global error workflow fires\n\n## Dependencies\n  Hostinger API   → VPS state, backups, Monarx (VM ID: 1101276)\n  Gmail OAuth2    → aliboussechill@gmail.com\n  OpenRouter API  → GET /v1/credits (Track B)\n  Telegram Bot    → disabled — set real chatId before enabling\n  vps_metrics.sh  → cron at 07:00 AM on VPS\n                    output : /data/metrics/vps_metrics.json\n                    logs   : /home/adlin/metrics/vps_metrics.log\n\n⚠️ Both Telegram nodes contain placeholder chatId \"YOUR_TELEGRAM_CHAT_ID\".\n   Do not enable without replacing this value first.\n\nAuthor: Ali Boussecsou — ali-n8n.com",
+        "height": 1104,
+        "width": 976,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -96,
+        800
+      ],
+      "id": "6bfd79b2-a17e-4ce3-a71f-0775d05a66e0",
+      "name": "WF-04 Main Doc"
+    },
+    {
+      "parameters": {
+        "content": "## Schedule & Timing — Why 07:10 AM?\n\nvps_metrics.sh runs via cron at 07:00 AM.\nExecution time: ~5 seconds under normal conditions.\n\nThis workflow triggers at 07:10 AM (10-minute buffer) to ensure:\n  1. vps_metrics.json is fully written and flushed to disk before n8n reads it\n  2. No race condition between file write and the Read VPS Metrics node\n\n⚠️ If you reschedule the cron job, update this trigger accordingly.\n⚠️ If the server reboots around 07:00 AM, the JSON may not be generated.\n   The 30-minute freshness guard in Build VPS Report catches this\n   and fires the global error workflow automatically.",
+        "height": 272,
+        "width": 736,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -848,
+        656
+      ],
+      "id": "64d2e62e-6cfb-438a-8a2b-0da171837163",
+      "name": "Schedule and Timing"
+    },
+    {
+      "parameters": {
+        "url": "https://openrouter.ai/api/v1/credits",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1760,
+        1456
+      ],
+      "id": "7380caae-fbc1-49f7-803e-be331a5b931d",
+      "name": "Get OpenRouter credits",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "openRouterApi": {
+          "id": "LSpFV2ns4dnMl2JY",
+          "name": "OpenRouter API Key #1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// On récupère les données du nœud précédent\nconst totalCredits = $input.item.json.data.total_credits;\nconst totalUsage = $input.item.json.data.total_usage;\n\n// Calcul du solde restant\nconst remainingBalance = totalCredits - totalUsage;\n\n// On retourne le résultat arrondi à 4 décimales pour plus de lisibilité\nreturn {\n  remaining_credits: Number(remainingBalance.toFixed(4)),\n  is_low_balance: remainingBalance < 2.0 // Un flag utile pour tes alertes\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        1456
+      ],
+      "id": "50923181-7204-4ba0-a162-896cde58614a",
+      "name": "Remaining Credits"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "⚠️ ALERT: OpenRouter Balance Critical (< $2.00)",
+        "message": "=<!DOCTYPE html>\n<html>\n<head><meta charset=\"UTF-8\"></head>\n<body style=\"margin:0;padding:20px;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#f7fafc;\">\n  <div style=\"max-width:500px;margin:0 auto;border:1px solid #eee;padding:20px;border-radius:10px;background:#ffffff;color:#333;line-height:1.6;\">\n    <div style=\"color:#d9534f;font-size:20px;font-weight:bold;margin-bottom:15px;\">⚠️ Action Required: Low Balance</div>\n    <p style=\"margin:0 0 16px;\">The AI budget for your automation workflow has reached the safety threshold.</p>\n    <div style=\"background-color:#fff5f5;border:1px solid #feb2b2;padding:20px;border-radius:8px;text-align:center;margin:20px 0;\">\n      <div style=\"font-size:11px;color:#718096;margin-bottom:8px;font-weight:bold;text-transform:uppercase;letter-spacing:1px;\">Reporting & Monitoring — Shopify Order Manager</div>\n      <div style=\"font-size:36px;font-weight:bold;color:#c53030;\">${{ $json.remaining_credits }}</div>\n      <a href=\"https://openrouter.ai/credits\" style=\"display:inline-block;background-color:#3182ce;color:#ffffff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;margin-top:15px;\">Top up — OpenRouter</a>\n    </div>\n    <p style=\"margin:0 0 16px;\">Please top up your account to prevent any interruption in Shopify order processing and monitoring.</p>\n    <div style=\"margin-top:25px;font-size:11px;color:#a0aec0;border-top:1px solid #edf2f7;padding-top:10px;\">\n      Generated by n8n | {{ new Date().toUTCString() }}\n    </div>\n  </div>\n</body>\n</html>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "ali-n8n.com Reporting & Monitoring"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2496,
+        1440
+      ],
+      "id": "4cb01a05-9a3c-47a4-a464-fb81aacc171f",
+      "name": "Send AI Credits Alert",
+      "webhookId": "9d0d6ce5-c9cb-483e-ba31-92f6c986f392",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4c4dd63e-3296-43a9-9332-b94faae6f13e",
+              "leftValue": "={{ $json.is_low_balance }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2192,
+        1456
+      ],
+      "id": "5618cd08-16cc-4b82-903a-d1a28b568e20",
+      "name": "Is Balance Below $2?"
+    },
+    {
+      "parameters": {
+        "content": "## Build VPS Report — Code Node\n\nAggregates all data sources and evaluates 8 alert conditions sequentially.\nEach hit appends to an alerts[] array.\nFinal alert count drives email subject prefix and header color.\n\n## Alert Thresholds\n\n  Condition                          Level   Threshold\n  ─────────────────────────────────────────────────────\n  Disk usage                         🔴      ≥ 80%\n  RAM usage                          🔴      ≥ 85%\n  Pending OS updates                 🟡      > 20 packages\n  Hostinger snapshot age             🔴      > 8 days\n  Docker container status            🔴      any container not \"Up\"\n  n8n auto-update                    🔴      status === \"failed\"\n  Local n8n backup                   🔴      status !== \"ok\"\n  Monarx malware scan                🔴      malicious > 0\n\n## Data Freshness Guard\nRuns before all thresholds.\nIf vps_metrics.json generated_at age > 30 min → throws immediately.\nNo report is sent. Global error workflow fires a high-priority alert.\n\n## Email Output\n  subject prefix  : ✅ VPS Nominal  |  🔴 N issue(s) detected\n  header color    : green #27ae60   |  red #e74c3c",
+        "height": 576,
+        "width": 768
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1552,
+        560
+      ],
+      "id": "7c7a35da-31b2-4c7c-a85e-131c342b1879",
+      "name": "Alert Thresholds"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=*⚠️ Low Balance Detected*\n\n*Project:* Reporting & Monitoring Shopify Order Manager\n*Current Balance:* `${{ $json.remaining_credits }}`\n*Status:* Critical \\(Below $2\\.00\\)\n\n[Click here to top up](https://openrouter.ai/credits)\n\n_Generated by n8n Instance — Casablanca_",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2816,
+        1456
+      ],
+      "id": "78ea9643-b488-462f-8201-40ef8882c509",
+      "name": "Fallback Telegram — AI Credits",
+      "webhookId": "8e58b3bd-0df0-4163-a1ba-c59721621fe8",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "No report, just check. / Custom message",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1152,
+        912
+      ],
+      "id": "c5e391ac-f76d-4d73-b1ef-a6002929ca8b",
+      "name": "Fallback Telegram — VPS Report",
+      "webhookId": "8e58b3bd-0df0-4163-a1ba-c59721621fe8",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Send VPS report / WF-04"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        912
+      ],
+      "id": "cfe58380-beb5-4fe1-a340-d6266edba980",
+      "name": "StopAndError — VPS Report"
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Send AI credits alert / WF-04"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3040,
+        1456
+      ],
+      "id": "939e6689-cb91-45ae-bf7b-35ec60cf4d09",
+      "name": "StopAndError — AI Credits"
+    },
+    {
+      "parameters": {
+        "content": "## Track B — OpenRouter Credit Monitor\n\nTrigger   : every 2 hours\nEndpoint  : GET https://openrouter.ai/api/v1/credits\n\nLogic (Remaining Credits — Code node):\n  remaining_balance = total_credits − total_usage\n  is_low_balance    = remaining_balance < 2.00\n\nIs Balance Below $2? (IF node):\n  TRUE  → Send AI Credits Alert (Gmail)\n        → Fallback Telegram — AI Credits (DISABLED)\n        → StopAndError → global error workflow\n  FALSE → silent exit — no output, no noise\n\n⚠️ Telegram node is disabled. Set real chatId before enabling.\n⚠️ Alert fires every 2 hours while balance stays low.\n   Consider a Redis cooldown flag to prevent alert spam.",
+        "height": 432,
+        "width": 2272,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        928,
+        1328
+      ],
+      "id": "007232ff-6d82-4649-ba99-cb524876258e",
+      "name": "Track B — AI Credits"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 2
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        1536,
+        1456
+      ],
+      "id": "10dc7e48-3cfc-4893-854e-1878d62847c1",
+      "name": "Every 2 Hour"
+    },
+    {
+      "parameters": {
+        "content": "## Meta\nVersion     : 1.0.0\nStatus      : stable — production\nLast update : 2026-05\nn8n version : 2.15.1\nTimezone    : Africa/Casablanca\n\nChangelog:\n  1.0.0 — Initial production release\n    • Dual-track architecture (daily health + hourly credit watch)\n    • 8-condition threshold engine with freshness guard\n    • Hostinger API integration (VPS + backups + Monarx)\n    • Gmail delivery + Telegram fallback (disabled by default)",
+        "height": 320,
+        "width": 432,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        1584
+      ],
+      "id": "dc929b00-6e91-482e-aff4-67f2f518faa1",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Read VPS Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read VPS Metrics": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List VPS backups": {
+      "main": [
+        [
+          {
+            "node": "Get Generic VPS Information",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Generic VPS Information": {
+      "main": [
+        [
+          {
+            "node": "Get Generic Monarx Information",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Generic Monarx Information": {
+      "main": [
+        [
+          {
+            "node": "Build VPS Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "List VPS backups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build VPS Report": {
+      "main": [
+        [
+          {
+            "node": "Send VPS Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every day at 7:10am": {
+      "main": [
+        [
+          {
+            "node": "Read VPS Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get OpenRouter credits": {
+      "main": [
+        [
+          {
+            "node": "Remaining Credits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send VPS Report": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — VPS Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remaining Credits": {
+      "main": [
+        [
+          {
+            "node": "Is Balance Below $2?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Balance Below $2?": {
+      "main": [
+        [
+          {
+            "node": "Send AI Credits Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send AI Credits Alert": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — AI Credits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — AI Credits": {
+      "main": [
+        [
+          {
+            "node": "StopAndError — AI Credits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — VPS Report": {
+      "main": [
+        [
+          {
+            "node": "StopAndError — VPS Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 2 Hour": {
+      "main": [
+        [
+          {
+            "node": "Get OpenRouter credits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "gvhDaCea1oROHUrb",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timezone": "Africa/Casablanca",
+    "timeSavedPerExecution": 10
+  },
+  "versionId": "17bef296-3e61-42aa-9b98-da9099b08e58",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "037b3acb9190b403df93357c4ddaf63c7eee296648f2ce69f739438f0a280d34"
+  },
+  "id": "0fSazjxIMYCBTAeN",
+  "tags": []
+}

@@ -1,0 +1,171 @@
+{
+  "name": "wf-03-error-handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        -16
+      ],
+      "id": "c1294505-a808-43a7-8223-1b12a9124b57",
+      "name": "Error Trigger for WF-01 & WF-02"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "=❌ Workflow Failure : {{ $json.wf_name }}",
+        "message": "==<table width=\"100%\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #f4f7f6; padding: 20px;\">\n  <tr>\n    <td align=\"center\">\n      <table width=\"550\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #ffffff; border-radius: 8px; border: 1px solid #e0e6ed; font-family: Arial, sans-serif;\">\n        <tr>\n          <td bgcolor=\"#ff4757\" style=\"padding: 15px; border-radius: 8px 8px 0 0; text-align: center; color: #ffffff; font-weight: bold;\">\n            WORKFLOW ERROR ALERT\n          </td>\n        </tr>\n        <tr>\n          <td style=\"padding: 30px;\">\n            <h2 style=\"color: #2f3542; margin-top: 0; font-size: 18px;\">Incident Details</h2>\n            <p style=\"font-size: 14px;\"><strong>Workflow:</strong> {{ $json.wf_name }}</p>\n            <p style=\"font-size: 14px;\"><strong>Failing Node:</strong> <span style=\"color: #eb4d4b; font-family: monospace;\">{{ $json.node_name }}</span></p>\n            <p style=\"font-size: 14px;\"><strong>Timestamp:</strong> {{ $json.timestamp }}</p>\n            <div style=\"margin-top: 20px; padding: 15px; background-color: #2f3542; border-radius: 6px; color: #7bed9f; font-family: monospace; font-size: 12px;\">\n              {{ $json.error_msg }}\n            </div>\n            <div style=\"margin-top: 30px; text-align: center;\">\n              <a href=\"{{ $json.exec_url }}\" style=\"padding: 12px 25px; background-color: #54a0ff; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold;\">VIEW EXECUTION</a>\n            </div>\n          </td>\n        </tr>\n      </table>\n    </td>\n  </tr>\n</table>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "n8n Monitor"
+        }
+      },
+      "id": "c8faef87-eafd-4e91-908b-819906a5f3b2",
+      "name": "Send Gmail Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        304,
+        -112
+      ],
+      "webhookId": "f70df267-8d26-4519-99a9-bcba3a3c87de",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e8a9f0e1-4b1a-4c1a-8b1a-4c1a8b1a4c1a",
+              "name": "wf_name",
+              "value": "={{ $json.workflow.name || 'Workflow Inconnu' }}",
+              "type": "string"
+            },
+            {
+              "id": "f8a9f0e1-4b1a-4c1a-8b1a-4c1a8b1a4c1a",
+              "name": "error_msg",
+              "value": "={{ $json.execution.error?.message || \"Aucun message d'erreur détaillé.\" }}",
+              "type": "string"
+            },
+            {
+              "id": "a8a9f0e1-4b1a-4c1a-8b1a-4c1a8b1a4c1a",
+              "name": "node_name",
+              "value": "={{ $json.execution.lastNodeExecuted || 'N/A' }}",
+              "type": "string"
+            },
+            {
+              "id": "b8a9f0e1-4b1a-4c1a-8b1a-4c1a8b1a4c1a",
+              "name": "exec_url",
+              "value": "={{ $json.execution.url }}",
+              "type": "string"
+            },
+            {
+              "id": "c8a9f0e1-4b1a-4c1a-8b1a-4c1a8b1a4c1a",
+              "name": "timestamp",
+              "value": "={{ $now.setZone('Europe/Paris').toFormat('dd/MM/yyyy HH:mm:ss') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "780223ee-482c-4ca3-ab16-14188022694b",
+      "name": "Format Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        32,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "{votre_id_telegram}",
+        "text": "=🚨 *n8n Alert* — {{ $json.wf_name }}\n\n❌ *Error* : `{{ $json.error_msg }}`\n📍 *Node* : {{ $json.node_name }}\n\n🔗 [Ouvrir l'exécution]({{ $json.exec_url }})\n🕐 {{ $json.timestamp }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "29532191-f328-471d-aded-d126fcd1e806",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        304,
+        112
+      ],
+      "webhookId": "de485f27-4f48-46f8-b3fd-0ddd5ddb38bc",
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "content": "# WF-Error — Centralized Error Handler\n\n## Purpose\nSingle entry point for all workflow failures across the n8n instance.\nRegistered workflows route their errors here automatically via n8n's\nerror workflow mechanism — no per-workflow error handling needed.\n\n## Execution Flow\n\n1. Error Trigger\n   Receives the raw n8n error payload from any registered workflow.\n\n2. Format Data (Set node)\n   Normalizes the payload to a clean flat structure:\n     wf_name   → workflow.name\n     error_msg → execution.error.message\n     node_name → execution.lastNodeExecuted\n     exec_url  → execution.url\n     timestamp → Europe/Paris timezone (dd/MM/yyyy HH:mm:ss)\n\n3. Fan-out (parallel)\n   → Send Gmail Alert   — HTML email, always active\n   → Send Telegram Alert — Markdown message, currently DISABLED\n\n## Alert Content\n  Subject : ❌ Workflow Failure : {wf_name}\n  Body    : wf_name / node_name / timestamp / error_msg / exec_url button\n  Sender  : n8n Monitor → aliboussechill@gmail.com\n\n## Registered Workflows\n  WF-01 — Shopify Order Manager (Main)\n  WF-02 — Weekly Sheet Quality Controller\n  ⚠️ Any new workflow must register this workflow as its error workflow.\n\n## Telegram Setup (when ready)\n  1. Replace {votre_id_telegram} with real chat ID in Send Telegram Alert node\n  2. Toggle the node ON\n\n## Meta\nVersion     : 1.0.0\nStatus      : stable — production\nLast update : 2026-05\nn8n version : 2.15.1\n\nAuthor: Ali Boussecsou — ali-n8n.com",
+        "height": 912,
+        "width": 672
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        576,
+        -432
+      ],
+      "id": "73db8b54-fec9-44d1-9c06-4322dad28fee",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger for WF-01 & WF-02": {
+      "main": [
+        [
+          {
+            "node": "Format Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Data": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Gmail Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9b4854d0-c690-4f49-ad7b-6c7375a46724",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "037b3acb9190b403df93357c4ddaf63c7eee296648f2ce69f739438f0a280d34"
+  },
+  "id": "gvhDaCea1oROHUrb",
+  "tags": []
+}

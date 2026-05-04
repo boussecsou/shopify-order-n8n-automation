@@ -1,0 +1,1779 @@
+{
+  "name": "wf-01-som-main",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// SHOPIFY ORDER PARSER — Production Grade\n// Devise de référence : shop_money (USD)\n// ============================================================\n\nreturn items.map(item => {\n  const order = item.json;\n\n  // ─── Helpers ─────────────────────────────────────────────\n  const shopMoney = (priceSet) =>\n    priceSet?.shop_money?.amount != null\n      ? parseFloat(priceSet.shop_money.amount)\n      : 0;\n\n  const safeStr = (val) =>\n    (val !== null && val !== undefined && val !== '') ? String(val).trim() : null;\n\n  // ─── Line Items ──────────────────────────────────────────\n  const products = (order.line_items || []).map(li => ({\n    line_item_id:     li.id,\n    product_id:       li.product_id   || null,\n    variant_id:       li.variant_id   || null,\n    name:             safeStr(li.title),\n    variant:          safeStr(li.variant_title),\n    sku:              safeStr(li.sku),\n    quantity:         li.quantity,\n    unit_price:       shopMoney(li.price_set),\n    total_line_price: shopMoney(li.price_set) * li.quantity,\n    total_discount:   shopMoney(li.total_discount_set),\n    weight_grams:     li.grams || 0,\n    is_custom_item:   li.product_id === null,\n    is_gift_card:     li.gift_card || false,\n    requires_shipping: li.requires_shipping || false,\n    fulfillment_status: safeStr(li.fulfillment_status),\n    // Propriétés custom (ex: gravure, personnalisation)\n    custom_properties: (li.properties || []).length > 0\n      ? li.properties.map(p => ({ key: p.name, value: p.value }))\n      : null\n  }));\n\n  // ─── Livraison ───────────────────────────────────────────\n  const shippingLine = (order.shipping_lines || [])[0] || null;\n\n  // ─── Admin URL ───────────────────────────────────────────\n  let shopDomain = null;\n  if (order.order_status_url) {\n    shopDomain = order.order_status_url.split('/')[2];\n  } else if (order.admin_graphql_api_id) {\n    // Fallback : extraire depuis le gid\n    // gid://shopify/Order/123 → on ne peut pas récupérer le domaine ici\n    // On utilise une constante connue du store\n    shopDomain = 'YOUR_STORE.myshopify.com';\n  }\n  const adminUrl = shopDomain\n    ? `https://${shopDomain}/admin/orders/${order.id}`\n    : null;\n\n  // ─── Payment Terms ───────────────────────────────────────\n  const paymentTerms = order.payment_terms\n    ? {\n        name:        safeStr(order.payment_terms.payment_terms_name),\n        type:        safeStr(order.payment_terms.payment_terms_type),\n        due_in_days: order.payment_terms.due_in_days || null,\n        due_at:      order.payment_terms.payment_schedules?.[0]?.due_at || null,\n        paid_at:     order.payment_terms.payment_schedules?.[0]?.completed_at || null\n      }\n    : null;\n\n  // ─── Résumé financier ────────────────────────────────────\n  const subtotal    = shopMoney(order.current_subtotal_price_set);\n  const shipping    = shippingLine ? shopMoney(shippingLine.price_set) : 0;\n  const tax         = shopMoney(order.current_total_tax_set);\n  const discounts   = shopMoney(order.current_total_discounts_set);\n  const total       = shopMoney(order.current_total_price_set);\n\n  return {\n    json: {\n\n      // ── Identité commande ─────────────────────────────────\n      order_id:           order.id,\n      order_number:       order.name,\n      confirmation_number: safeStr(order.confirmation_number),\n      source:             safeStr(order.source_name),\n      tags:               safeStr(order.tags),\n      created_at:         order.created_at,\n      processed_at:       order.processed_at,\n      updated_at:         order.updated_at,\n\n      // ── Finance ───────────────────────────────────────────\n      financial_status:   order.financial_status,\n      is_paid:            order.financial_status === 'paid',\n      currency:           order.currency,\n      display_currency:   order.presentment_currency,\n      subtotal:           subtotal,\n      shipping_cost:      shipping,\n      shipping_method:    safeStr(shippingLine?.title),\n      total_tax:          tax,\n      total_discounts:    discounts,\n      total:              total,\n      total_outstanding:  parseFloat(order.total_outstanding || 0),\n      payment_methods:    order.payment_gateway_names || [],\n      payment_terms:      paymentTerms,\n\n      // ── Client ────────────────────────────────────────────\n      customer: {\n        id:           order.customer?.id || null,\n        first_name:   safeStr(order.customer?.first_name),\n        last_name:    safeStr(order.customer?.last_name),\n        full_name:    [order.customer?.first_name, order.customer?.last_name]\n                        .filter(Boolean).join(' ').trim() || null,\n        email:        safeStr(order.email) || safeStr(order.contact_email),\n        phone:        safeStr(order.phone) || safeStr(order.customer?.phone),\n        locale:       safeStr(order.customer_locale),\n        is_vip:       order.customer?.tags?.split(',').map(t => t.trim()).includes('VIP') || false,\n        accepts_marketing: order.buyer_accepts_marketing || false\n      },\n\n      // ── Adresse livraison ─────────────────────────────────\n      shipping_address: order.shipping_address\n        ? {\n            full_name: [order.shipping_address.first_name, order.shipping_address.last_name]\n                         .filter(Boolean).join(' ').trim() || null,\n            address1:  safeStr(order.shipping_address.address1),\n            address2:  safeStr(order.shipping_address.address2),\n            city:      safeStr(order.shipping_address.city),\n            zip:       safeStr(order.shipping_address.zip),\n            province:  safeStr(order.shipping_address.province),\n            country:   safeStr(order.shipping_address.country),\n            country_code: safeStr(order.shipping_address.country_code)\n          }\n        : null,\n\n      // ── Produits ──────────────────────────────────────────\n      products:           products,\n      total_items_count:  products.reduce((sum, p) => sum + p.quantity, 0),\n      total_weight_grams: order.total_weight || 0,\n      has_custom_items:   products.some(p => p.is_custom_item),\n      has_gift_cards:     products.some(p => p.is_gift_card),\n\n      // ── Liens ─────────────────────────────────────────────\n      order_status_url: safeStr(order.order_status_url),\n      admin_url:        adminUrl\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        2448
+      ],
+      "id": "d9baa9be-102c-4f71-85b5-f6c6bd988736",
+      "name": "Shopify Order Parser"
+    },
+    {
+      "parameters": {
+        "fieldsToSummarize": {
+          "values": [
+            {
+              "aggregation": "max",
+              "field": "order_id"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.summarize",
+      "typeVersion": 1.1,
+      "position": [
+        2144,
+        2720
+      ],
+      "id": "fef56534-70ca-4da4-bbfc-66d2d6f30b33",
+      "name": "Get Max sinceId"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "last_since_id",
+        "key": "shopify:sinceid",
+        "keyType": "string",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        880,
+        2080
+      ],
+      "id": "5b27ad4d-8a34-4d7c-b395-e83556d298f5",
+      "name": "Get last sinceId",
+      "retryOnFail": false,
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "shopify:sinceid",
+        "value": "={{ $json.max_order_id }}",
+        "keyType": "string"
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        2720
+      ],
+      "id": "68d376ca-df60-4d5e-baa5-ae6d5b0cab09",
+      "name": "Set max sinceId (NoTTL)",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "1750bdda-8faa-4922-934c-a9355930db99",
+              "leftValue": "={{ $json.last_since_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "faebf6f3-b67f-4a97-94c6-a69ff16188ad",
+              "leftValue": "={{ $json.last_since_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        224,
+        2448
+      ],
+      "id": "e247a54f-3e13-4615-a7aa-7bb72695d15a",
+      "name": "Has sinceId?"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "getAll",
+        "limit": 3,
+        "options": {
+          "financialStatus": "paid",
+          "fulfillmentStatus": "any",
+          "status": "any"
+        }
+      },
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [
+        512,
+        2576
+      ],
+      "id": "f33d3e94-5de9-41b7-8562-8359fb09b0d8",
+      "name": "Get many orders without sinceId",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "shopifyOAuth2Api": {
+          "id": "MQD5j1ly4ZWX1drF",
+          "name": "n8n-acess1_oauth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "getAll",
+        "limit": 3,
+        "options": {
+          "financialStatus": "paid",
+          "fulfillmentStatus": "any",
+          "status": "any",
+          "sinceId": "={{ $json.last_since_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [
+        512,
+        2304
+      ],
+      "id": "271435d9-4f23-4f67-b3c3-9d7eb0beeb62",
+      "name": "Get many orders with sinceId",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "shopifyOAuth2Api": {
+          "id": "MQD5j1ly4ZWX1drF",
+          "name": "n8n-acess1_oauth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "key": "shopify:sinceid"
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1728,
+        928
+      ],
+      "id": "8a661248-22af-42ad-91df-68455dd96e1d",
+      "name": "Reset sinceId",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "sheet_name",
+        "key": "shopify:sheet:name",
+        "keyType": "string",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        624,
+        1584
+      ],
+      "id": "8fcf14a4-5066-47ec-b6b1-94086aa84536",
+      "name": "Get actual sheet name from Redis (1st Branch)",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// COMPUTE & CHECK SHEET WEEK\n// Format : WEEK{n}_{yyyy} — ex: WEEK16_2026\n// Basé sur ISO 8601 UTC — semaine commence le lundi\n// ============================================================\n\nconst now = new Date();\nconst year  = now.getUTCFullYear();\nconst month = now.getUTCMonth();\nconst date  = now.getUTCDate();\n\n// ─── Numéro de semaine ISO (standard, éprouvé) ────────────\n// Algorithme : trouver le jeudi de la semaine courante,\n// car en ISO 8601 c'est le jeudi qui \"définit\" la semaine\nconst iso = new Date(Date.UTC(year, month, date));\niso.setUTCDate(iso.getUTCDate() + 4 - (iso.getUTCDay() || 7));\nconst yearStart  = new Date(Date.UTC(iso.getUTCFullYear(), 0, 1));\nconst weekNumber = Math.ceil((((iso - yearStart) / 86400000) + 1) / 7);\nconst weekYear   = iso.getUTCFullYear(); // important : peut différer de year en W1/W52\n\n// ─── Nom final ────────────────────────────────────────────\nconst computedName = `WEEK${weekNumber}_${weekYear}`;\nconst storedName   = $input.first().json.sheet_name;\n\nreturn [{\n  json: {\n    stored_name:   storedName,   // \"WEEK16_2026\"\n    computed_name: computedName, // \"WEEK16_2026\"\n    week_changed:  computedName !== storedName\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        1584
+      ],
+      "id": "68933204-b808-48a3-9976-79daf7dc0907",
+      "name": "Compute & Check Sheet Week  (1st Branch)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3f931b8c-9e71-424f-bce4-7332672b6029",
+              "leftValue": "={{ $json.week_changed }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        1584
+      ],
+      "id": "e2ad00dd-0887-4b02-afc2-a5bd61e6feb7",
+      "name": "Is New Week? (1st Branch)"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "documentId": {
+          "__rl": true,
+          "value": "1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io",
+          "mode": "list",
+          "cachedResultName": "ShopifyPaidOrders_Spreadsheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io/edit?usp=drivesdk"
+        },
+        "title": "={{ $json.computed_name }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1408,
+        1440
+      ],
+      "id": "7cf42b07-c9d7-432e-aba7-205ffd383bf0",
+      "name": "Create new sheet (True Branch)",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZaqazKIauwPoHX4V",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "sheet_name_branch2",
+        "key": "shopify:sheet:name",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        640,
+        2080
+      ],
+      "id": "67c6cbe2-4dbf-462a-8c20-76dbad9ae088",
+      "name": "Get sheet name for branch2 from Redis",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\n// ─── Grouper par order_id ─────────────────────────────────\nconst ordersMap = {};\n\nfor (const item of items) {\n  const d = item.json;\n  const oid = d.order_id;\n\n  if (!ordersMap[oid]) {\n    ordersMap[oid] = {\n      order_number:     d.order_number,\n      created_at:       d.created_at,\n      customer_name:    d.customer_name,\n      customer_email:   d.customer_email,\n      is_vip:           d.is_vip,\n      shipping_country: d.shipping_country || 'N/A',\n      payment_method:   d.payment_method,\n      currency:         d.currency,\n      tags:             d.tags || '',\n      line_items:       [],\n      order_total:      0,\n      order_discount:   0,\n    };\n  }\n\n  ordersMap[oid].line_items.push({\n    product_name:     d.product_name,\n    variant:          d.variant          || '',\n    sku:              d.sku              || '',\n    quantity:         d.quantity,\n    unit_price:       d.unit_price,\n    total_line_price: d.total_line_price,\n    total_discount:   d.total_discount,\n    is_custom_item:   d.is_custom_item,\n  });\n\n  ordersMap[oid].order_total    = Math.round((ordersMap[oid].order_total    + d.total_line_price) * 100) / 100;\n  ordersMap[oid].order_discount = Math.round((ordersMap[oid].order_discount + d.total_discount)   * 100) / 100;\n}\n\nconst orders = Object.values(ordersMap);\n\n// ─── KPIs ─────────────────────────────────────────────────\nconst total_revenue      = Math.round(orders.reduce((s, o) => s + o.order_total,    0) * 100) / 100;\nconst total_discounts    = Math.round(orders.reduce((s, o) => s + o.order_discount, 0) * 100) / 100;\nconst vip_count          = orders.filter(o => o.is_vip).length;\nconst total_line_items   = orders.reduce((s, o) => s + o.line_items.length, 0);\nconst custom_items_count = orders.reduce((s, o) => s + o.line_items.filter(l => l.is_custom_item).length, 0);\n\n// ─── Métadonnées ──────────────────────────────────────────\nconst sheet_name    = $('Get sheet name for branch2 from Redis').first().json.sheet_name_branch2;\nconst run_timestamp = items[0]?.json?.inserted_at || new Date().toISOString();\n\n// ─── Alerte volume ────────────────────────────────────────\nconst VOLUME_THRESHOLD = 50;\nconst volume_alert     = orders.length > VOLUME_THRESHOLD\n  ? `⚠ ${orders.length} orders received — threshold ${VOLUME_THRESHOLD} exceeded`\n  : null;\n\n// ─── Output ───────────────────────────────────────────────\nreturn [{\n  json: {\n    sheet_name,\n    run_timestamp,\n    volume_alert,\n    kpis: {\n      orders_count:        orders.length,\n      total_line_items,\n      total_revenue,\n      total_discounts,\n      vip_count,\n      custom_items_count,\n    },\n    orders,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2176,
+        2928
+      ],
+      "id": "c90d3f48-9880-4f57-bd78-7fae6b7cb5cc",
+      "name": "Aggregate Orders for Email"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io/values/{{ $json.computed_name }}!A1:T1?valueInputOption=RAW",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"values\": [[\n    \"inserted_at\",\"order_id\",\"order_number\",\"created_at\",\n    \"customer_name\",\"customer_email\",\"is_vip\",\"shipping_country\",\n    \"payment_method\",\"currency\",\"tags\",\"line_item_id\",\n    \"product_name\",\"variant\",\"sku\",\"quantity\",\n    \"unit_price\",\"total_line_price\",\"total_discount\",\"is_custom_item\"\n  ]]\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1408,
+        1680
+      ],
+      "id": "d69bb60c-b744-4498-94a7-821c6b405ec9",
+      "name": "Write Headers to New Sheet",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZaqazKIauwPoHX4V",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"requests\": [\n    {\n      \"repeatCell\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"startRowIndex\": 0,\n          \"endRowIndex\": 1,\n          \"startColumnIndex\": 0,\n          \"endColumnIndex\": 20\n        },\n        \"cell\": {\n          \"userEnteredFormat\": {\n            \"backgroundColor\": {\"red\": 0.118, \"green\": 0.302, \"blue\": 0.169},\n            \"textFormat\": {\n              \"foregroundColor\": {\"red\": 1, \"green\": 1, \"blue\": 1},\n              \"bold\": true,\n              \"fontSize\": 10\n            },\n            \"horizontalAlignment\": \"CENTER\"\n          }\n        },\n        \"fields\": \"userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)\"\n      }\n    },\n    {\n      \"updateSheetProperties\": {\n        \"properties\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"gridProperties\": {\"frozenRowCount\": 1}\n        },\n        \"fields\": \"gridProperties.frozenRowCount\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 0,\n          \"endIndex\": 1\n        },\n        \"properties\": {\"pixelSize\": 160},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 1,\n          \"endIndex\": 2\n        },\n        \"properties\": {\"pixelSize\": 140},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 2,\n          \"endIndex\": 3\n        },\n        \"properties\": {\"pixelSize\": 120},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 3,\n          \"endIndex\": 4\n        },\n        \"properties\": {\"pixelSize\": 160},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 4,\n          \"endIndex\": 5\n        },\n        \"properties\": {\"pixelSize\": 160},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 5,\n          \"endIndex\": 6\n        },\n        \"properties\": {\"pixelSize\": 220},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 6,\n          \"endIndex\": 7\n        },\n        \"properties\": {\"pixelSize\": 80},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 7,\n          \"endIndex\": 8\n        },\n        \"properties\": {\"pixelSize\": 130},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 8,\n          \"endIndex\": 9\n        },\n        \"properties\": {\"pixelSize\": 130},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 9,\n          \"endIndex\": 10\n        },\n        \"properties\": {\"pixelSize\": 80},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 10,\n          \"endIndex\": 11\n        },\n        \"properties\": {\"pixelSize\": 180},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 11,\n          \"endIndex\": 12\n        },\n        \"properties\": {\"pixelSize\": 150},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 12,\n          \"endIndex\": 13\n        },\n        \"properties\": {\"pixelSize\": 220},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 13,\n          \"endIndex\": 14\n        },\n        \"properties\": {\"pixelSize\": 100},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 14,\n          \"endIndex\": 15\n        },\n        \"properties\": {\"pixelSize\": 120},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 15,\n          \"endIndex\": 16\n        },\n        \"properties\": {\"pixelSize\": 80},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 16,\n          \"endIndex\": 17\n        },\n        \"properties\": {\"pixelSize\": 100},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 17,\n          \"endIndex\": 18\n        },\n        \"properties\": {\"pixelSize\": 130},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 18,\n          \"endIndex\": 19\n        },\n        \"properties\": {\"pixelSize\": 120},\n        \"fields\": \"pixelSize\"\n      }\n    },\n    {\n      \"updateDimensionProperties\": {\n        \"range\": {\n          \"sheetId\": {{ $('Create new sheet (True Branch)').first().json.sheetId }},\n          \"dimension\": \"COLUMNS\",\n          \"startIndex\": 19,\n          \"endIndex\": 20\n        },\n        \"properties\": {\"pixelSize\": 120},\n        \"fields\": \"pixelSize\"\n      }\n    }\n  ]\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1616,
+        1680
+      ],
+      "id": "225c7256-0267-4d18-8aa0-54078963826a",
+      "name": "Format New Sheet Headers",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZaqazKIauwPoHX4V",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate the HTML email for this data:\n{{ JSON.stringify($json) }}",
+        "needsFallback": true,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are an HTML email generator for a Shopify order automation system.\n\nOUTPUT RULES:\n- Raw HTML only. Zero markdown, zero backticks, zero explanation.\n- Every style must be inline. No <style> blocks, no classes.\n- Font: Arial, sans-serif. Max-width: 600px. Background: #f4f4f4.\n\nYOU WILL BE GIVEN a JSON object. Your job is to fill the template below with the real data. Do not invent data. Do not skip orders. Do not skip line items.\n\n═══════════════════════════════════════\nFIXED HTML TEMPLATE — respect it exactly\n═══════════════════════════════════════\n\n<div style=\"background:#f4f4f4;padding:24px;font-family:Arial,sans-serif;\">\n<div style=\"max-width:600px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;\">\n\n  <!-- HEADER -->\n  <div style=\"background:#1E3A2F;padding:24px 28px;\">\n    <h1 style=\"color:#ffffff;font-size:18px;font-weight:600;margin:0 0 4px 0;\">Shopify Orders Report</h1>\n    <p style=\"color:rgba(255,255,255,0.6);font-size:12px;margin:0;\">Run: {run_timestamp} &nbsp;·&nbsp; Sheet: {sheet_name}</p>\n    <!-- IF volume_alert is not null, add this block: -->\n    <!-- <div style=\"background:#E24B4A;color:#fff;font-size:12px;padding:8px 12px;border-radius:4px;margin-top:12px;\">{volume_alert}</div> -->\n  </div>\n\n  <!-- KPI GRID -->\n  <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-bottom:1px solid #e5e5e5;\">\n    <tr>\n      <td style=\"padding:16px;text-align:center;border-right:1px solid #e5e5e5;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">Orders</div>\n        <div style=\"font-size:22px;font-weight:600;color:#1a1a1a;\">{kpis.orders_count}</div>\n      </td>\n      <td style=\"padding:16px;text-align:center;border-right:1px solid #e5e5e5;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">Revenue</div>\n        <div style=\"font-size:22px;font-weight:600;color:#1D9E75;\">${kpis.total_revenue}</div>\n      </td>\n      <td style=\"padding:16px;text-align:center;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">Discounts</div>\n        <div style=\"font-size:22px;font-weight:600;color:#E24B4A;\">-${kpis.total_discounts}</div>\n      </td>\n    </tr>\n    <tr style=\"border-top:1px solid #e5e5e5;\">\n      <td style=\"padding:16px;text-align:center;border-right:1px solid #e5e5e5;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">Line Items</div>\n        <div style=\"font-size:22px;font-weight:600;color:#1a1a1a;\">{kpis.total_line_items}</div>\n      </td>\n      <td style=\"padding:16px;text-align:center;border-right:1px solid #e5e5e5;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">VIP</div>\n        <div style=\"font-size:22px;font-weight:600;color:#1a1a1a;\">{kpis.vip_count}</div>\n      </td>\n      <td style=\"padding:16px;text-align:center;\">\n        <div style=\"font-size:11px;color:#888780;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;\">Custom Items</div>\n        <div style=\"font-size:22px;font-weight:600;color:#1a1a1a;\">{kpis.custom_items_count}</div>\n      </td>\n    </tr>\n  </table>\n\n  <!-- ORDERS — repeat this block for EACH order in orders[] -->\n  <div style=\"padding:16px 24px;\">\n\n    <!-- ORDER BLOCK (repeat for each order) -->\n    <div style=\"border:1px solid #e5e5e5;border-radius:6px;margin-bottom:12px;overflow:hidden;\">\n\n      <!-- Order header -->\n      <div style=\"background:#f9f9f9;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;\">\n        <div>\n          <span style=\"font-size:13px;font-weight:600;color:#1a1a1a;\">{order.order_number}</span>\n          <!-- IF is_vip: -->\n          <span style=\"background:#FAEEDA;color:#633806;font-size:10px;padding:2px 7px;border-radius:999px;margin-left:6px;\">⭐ VIP</span>\n          <span style=\"font-size:12px;color:#888780;margin-left:6px;\">{order.customer_name} · {order.shipping_country}</span>\n        </div>\n        <div>\n          <span style=\"font-size:13px;font-weight:600;color:#1a1a1a;\">${order.order_total}</span>\n          <!-- IF order_discount > 0: -->\n          <span style=\"font-size:11px;color:#E24B4A;margin-left:4px;\">-${order.order_discount}</span>\n        </div>\n      </div>\n\n      <!-- Order meta -->\n      <div style=\"padding:6px 14px;border-top:1px solid #f0f0f0;\">\n        <span style=\"font-size:11px;color:#888780;\">{order.payment_method} &nbsp;·&nbsp; Tags: {order.tags}</span>\n      </div>\n\n      <!-- Line items table -->\n      <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #f0f0f0;font-size:12px;\">\n        <tr style=\"background:#f9f9f9;\">\n          <th style=\"padding:6px 14px;text-align:left;font-weight:500;color:#888780;\">Product</th>\n          <th style=\"padding:6px 14px;text-align:left;font-weight:500;color:#888780;\">SKU</th>\n          <th style=\"padding:6px 14px;text-align:center;font-weight:500;color:#888780;\">Qty</th>\n          <th style=\"padding:6px 14px;text-align:right;font-weight:500;color:#888780;\">Total</th>\n        </tr>\n        <!-- repeat for each line_item in order.line_items -->\n        <tr style=\"border-top:1px solid #f0f0f0;\">\n          <td style=\"padding:8px 14px;color:#1a1a1a;\">\n            {line_item.product_name}\n            <!-- IF is_custom_item: -->\n            <span style=\"background:#FAEEDA;color:#633806;font-size:10px;padding:2px 6px;border-radius:999px;margin-left:4px;\">🛠 Custom</span>\n          </td>\n          <td style=\"padding:8px 14px;color:#888780;\">{line_item.sku}</td>\n          <td style=\"padding:8px 14px;text-align:center;color:#1a1a1a;\">{line_item.quantity}</td>\n          <td style=\"padding:8px 14px;text-align:right;color:#1a1a1a;\">${line_item.total_line_price}</td>\n        </tr>\n        <!-- end repeat -->\n      </table>\n\n    </div>\n    <!-- end ORDER BLOCK -->\n\n  </div>\n\n  <!-- FOOTER -->\n  <div style=\"padding:16px 24px;text-align:center;border-top:1px solid #e5e5e5;\">\n    <p style=\"font-size:11px;color:#888780;margin:0;\">Generated automatically by ali-n8n.com</p>\n  </div>\n\n</div>\n</div>\n\n═══════════════════════════════════════\nBADGE RULES:\n- is_vip = true → show ⭐ VIP badge (amber) next to customer name\n- is_custom_item = true → show 🛠 Custom badge (amber) next to product name\n- order_discount > 0 → show discount in red next to total\n- volume_alert not null → show red banner in header\n\nITERATION RULES:\n- Loop over every item in orders[]\n- For each order, loop over every item in order.line_items[]\n- Never skip an order. Never skip a line item.\n- If tags is empty string, write \"—\"\n- If shipping_country is null, write \"N/A\""
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2448,
+        2928
+      ],
+      "id": "e3330247-0fbf-4c04-b17d-5902e2757fed",
+      "name": "AI : Generate run report"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Shopify Paid Order Workflow"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        3024,
+        2928
+      ],
+      "id": "78bc70ed-16dc-428b-adba-712fa9ee6c93",
+      "name": "Send run report",
+      "webhookId": "74a9ccfa-be03-4ccf-9bfc-cf69afc7ddd4",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0b077d27-a16b-4b30-aafe-d88e23ac1dfa",
+              "name": "subject",
+              "value": "=[Shopify] {{ $('Aggregate Orders for Email').first().json.kpis.orders_count }} orders · ${{ $('Aggregate Orders for Email').first().json.kpis.total_revenue }} · {{ $('Aggregate Orders for Email').first().json.run_timestamp.split(' ')[0] }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2800,
+        2928
+      ],
+      "id": "43cf2331-583e-4cbd-99fa-fd8ecae74b55",
+      "name": "Create subject"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        336,
+        2016
+      ],
+      "id": "7f3c32ea-5a32-4fad-8fcd-9ed6b50c4bce",
+      "name": "Trigger every 30min"
+    },
+    {
+      "parameters": {
+        "fieldsToSummarize": {
+          "values": [
+            {
+              "field": "order_id",
+              "includeEmpty": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.summarize",
+      "typeVersion": 1.1,
+      "position": [
+        1248,
+        2256
+      ],
+      "id": "233ffb9f-e376-4eb5-b033-897c7d3ccd50",
+      "name": "Count Orders"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "=📈 High activity: 50-order threshold reached (Ref: {{ $execution.id }})",
+        "message": "=<table width=\"100%\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #f8f9fa; padding: 20px;\">\n    <tr>\n        <td align=\"center\">\n            <table width=\"450\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #ffffff; border-radius: 12px; border-top: 8px solid #ff9f43; font-family: 'Segoe UI', Arial, sans-serif; box-shadow: 0 4px 12px rgba(0,0,0,0.05);\">\n                <tr>\n                    <td align=\"center\" style=\"padding: 30px;\">\n                        <div style=\"font-size: 40px; margin-bottom: 15px;\">📊</div>\n                        <h2 style=\"color: #2f3542; margin: 0 0 10px 0; font-size: 20px;\">Activity spike detected</h2>\n                        <p style=\"color: #57606f; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;\">\n                            The automation is running normally, but a significant threshold has been crossed:\n                        </p>\n                        <table border=\"0\" cellspacing=\"0\" cellpadding=\"0\">\n                            <tr>\n                                <td align=\"center\" bgcolor=\"#ff9f43\" style=\"border-radius: 6px; padding: 12px 25px;\">\n                                    <span style=\"color: #ffffff; font-weight: bold; font-size: 18px; display: block;\">\n                                        50+ Orders processed\n                                    </span>\n                                </td>\n                            </tr>\n                        </table>\n                        <p style=\"color: #7f8c8d; font-size: 14px; margin-top: 25px;\">\n                            Nothing unusual to report, execution continues normally. A quick inventory check is suggested as a precaution.\n                        </p>\n                        <hr style=\"border: 0; border-top: 1px solid #eee; margin: 20px 0;\">\n                        <p style=\"color: #a4b0be; font-size: 11px; margin: 0;\">\n                            n8n execution: <strong>{{ $execution.id }}</strong>\n                        </p>\n                    </td>\n                </tr>\n            </table>\n        </td>\n    </tr>\n</table>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Shopify Order Manager"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2048,
+        2320
+      ],
+      "id": "b28d9b9e-dfe3-4b7a-81ef-26162867fe27",
+      "name": "Send >50 Alert",
+      "webhookId": "1c068591-f448-4f42-bc93-3ce837637f37",
+      "retryOnFail": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "=📈 High activity: 100-order threshold reached (Ref: {{ $execution.id }})",
+        "message": "=<table width=\"100%\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #f8f9fa; padding: 20px;\">\n    <tr>\n        <td align=\"center\">\n            <table width=\"450\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #ffffff; border-radius: 12px; border-top: 8px solid #ff9f43; font-family: 'Segoe UI', Arial, sans-serif; box-shadow: 0 4px 12px rgba(0,0,0,0.05);\">\n                <tr>\n                    <td align=\"center\" style=\"padding: 30px;\">\n                        <div style=\"font-size: 40px; margin-bottom: 15px;\">📊</div>\n                        <h2 style=\"color: #2f3542; margin: 0 0 10px 0; font-size: 20px;\">Activity spike detected</h2>\n                        <p style=\"color: #57606f; font-size: 15px; line-height: 1.6; margin: 0 0 20px 0;\">\n                            The automation is running normally, but a significant threshold has been crossed:\n                        </p>\n                        <table border=\"0\" cellspacing=\"0\" cellpadding=\"0\">\n                            <tr>\n                                <td align=\"center\" bgcolor=\"#ff9f43\" style=\"border-radius: 6px; padding: 12px 25px;\">\n                                    <span style=\"color: #ffffff; font-weight: bold; font-size: 18px; display: block;\">\n                                        100+ Orders processed\n                                    </span>\n                                </td>\n                            </tr>\n                        </table>\n                        <p style=\"color: #7f8c8d; font-size: 14px; margin-top: 25px;\">\n                            Nothing unusual to report, execution continues normally. A quick inventory check is suggested as a precaution.\n                        </p>\n                        <hr style=\"border: 0; border-top: 1px solid #eee; margin: 20px 0;\">\n                        <p style=\"color: #a4b0be; font-size: 11px; margin: 0;\">\n                            n8n execution: <strong>{{ $execution.id }}</strong>\n                        </p>\n                    </td>\n                </tr>\n            </table>\n        </td>\n    </tr>\n</table>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Shopify Order Manager"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2064,
+        2048
+      ],
+      "id": "48225ef8-2277-426b-ac72-976fe911263d",
+      "name": "Send >100 Alert",
+      "webhookId": "1c068591-f448-4f42-bc93-3ce837637f37",
+      "retryOnFail": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "anthropic/claude-haiku-4.5",
+        "options": {
+          "frequencyPenalty": 0,
+          "maxTokens": 6000,
+          "responseFormat": "text",
+          "presencePenalty": 0,
+          "temperature": 0.7,
+          "timeout": 360000,
+          "maxRetries": 2,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        2544,
+        3120
+      ],
+      "id": "dccf4961-4275-41b9-a981-220d936e46d3",
+      "name": "Claude Haiku 4.5",
+      "credentials": {
+        "openRouterApi": {
+          "id": "LSpFV2ns4dnMl2JY",
+          "name": "OpenRouter API Key #1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "=⚪ No orders — Run {{ $execution.id }} · {{ DateTime.now().setZone('Europe/Paris').toFormat('MM/dd/yyyy HH:mm') }}",
+        "message": "=<table width=\"100%\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #f4f7f6; padding: 20px;\">\n  <tr>\n    <td align=\"center\">\n      <table width=\"480\" border=\"0\" cellspacing=\"0\" cellpadding=\"0\" style=\"background-color: #ffffff; border-radius: 8px; border: 1px solid #e0e6ed; font-family: Helvetica, Arial, sans-serif;\">\n        <tr>\n          <td bgcolor=\"#2f3542\" style=\"padding: 18px; border-radius: 8px 8px 0 0; text-align: center;\">\n            <span style=\"color: #a4b0be; font-size: 13px; letter-spacing: 1px; font-weight: bold;\">SHOPIFY ORDER MANAGER</span>\n          </td>\n        </tr>\n        <tr>\n          <td style=\"padding: 40px 30px; text-align: center;\">\n            <div style=\"font-size: 36px; margin-bottom: 16px;\">⚪</div>\n            <h2 style=\"color: #2f3542; margin: 0 0 12px 0; font-size: 18px;\">No new orders</h2>\n            <p style=\"color: #57606f; font-size: 14px; line-height: 1.6; margin: 0;\">\n              This run returned no orders to process.<br>The system is operating normally.\n            </p>\n          </td>\n        </tr>\n        <tr>\n          <td align=\"center\" style=\"padding: 16px; background-color: #f1f2f6; border-radius: 0 0 8px 8px; font-size: 11px; color: #a4b0be;\">\n            n8n execution: <strong>{{ $execution.id }}</strong> · {{ DateTime.now().setZone('Europe/Paris').toFormat('MM/dd/yyyy HH:mm') }}\n          </td>\n        </tr>\n      </table>\n    </td>\n  </tr>\n</table>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Shopify Orders Manager"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        3040
+      ],
+      "id": "ee4c9150-1130-4e99-a946-c49bcb9686be",
+      "name": "Send the 0 order report",
+      "webhookId": "e85f98fc-6e9d-4024-a0b2-b48a5d12b6b1",
+      "retryOnFail": true,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "50d25c34-511d-460c-be3c-ec0a8e14a314",
+              "leftValue": "={{ $json.total_items_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1232,
+        2736
+      ],
+      "id": "0f358115-0c4a-43cd-841b-0d384b55269e",
+      "name": "Has Orders?"
+    },
+    {
+      "parameters": {
+        "model": "x-ai/grok-4-fast",
+        "options": {
+          "frequencyPenalty": 0,
+          "maxTokens": 6000,
+          "responseFormat": "text",
+          "presencePenalty": 0,
+          "temperature": 1,
+          "timeout": 360000,
+          "maxRetries": 2,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        2368,
+        3120
+      ],
+      "id": "c161d3b2-2d73-4808-b1de-666019828761",
+      "name": "Grok 4 Fast",
+      "credentials": {
+        "openRouterApi": {
+          "id": "LSpFV2ns4dnMl2JY",
+          "name": "OpenRouter API Key #1"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        304,
+        1648
+      ],
+      "id": "f8537bd0-91c2-42e0-ab34-39771cb7ee84",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=⚠️ Gmail FAILED — Volume Alert >100\n📊 Orders detected: {{ $json.count_order_id }}\n🔗 https://ali-n8n.com/executions\n🕐 {{ $now.setZone('Europe/Paris').toFormat('MM/dd/yyyy HH:mm') }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2288,
+        2064
+      ],
+      "id": "bea2beff-7517-49ba-8100-739f753ebc66",
+      "name": "Fallback Telegram — >100 Orders",
+      "webhookId": "04b6197a-a2d2-463c-9c29-1d488c816556",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=⚠️ Gmail FAILED — Volume Alert >50\n📊 Orders detected: {{ $json.count_order_id }}\n🔗 https://ali-n8n.com/executions\n🕐 {{ $now.setZone('Europe/Paris').toFormat('MM/dd/yyyy HH:mm') }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2304,
+        2336
+      ],
+      "id": "103bec63-9254-4de8-9aeb-62ebcda3d773",
+      "name": "Fallback Telegram — >50 Orders",
+      "webhookId": "8b67d19d-4500-49d2-b2e6-e53641ecd055",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=⚠️ Gmail FAILED — 0 Orders Report\n📋 Sheet: {{ $('Get sheet name for branch2 from Redis').first().json.sheet_name_branch2 }}\nℹ️ No orders to process on this run\n🔗 https://ali-n8n.com/executions\n🕐 {{ $now.setZone('Europe/Paris').toFormat('MM/dd/yyyy HH:mm') }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1184,
+        3120
+      ],
+      "id": "237c25bc-13b7-4a35-abae-41466341fb78",
+      "name": "Fallback Telegram — 0 Orders",
+      "webhookId": "bd665df4-8b52-4457-827e-bdd1955d391a",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=⚠️ Gmail FAILED — Shopify Run Report\n📊 Orders: {{ $('Aggregate Orders for Email').first().json.kpis.orders_count }} | Revenue: ${{ $('Aggregate Orders for Email').first().json.kpis.total_revenue }}\n📋 Sheet: {{ $('Aggregate Orders for Email').first().json.sheet_name }}\n🔗 https://ali-n8n.com/executions\n🕐 {{ $('Aggregate Orders for Email').first().json.run_timestamp }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3264,
+        3008
+      ],
+      "id": "2452c2bc-4890-40f2-b66c-dfa165447ab6",
+      "name": "Fallback Telegram — Run Report",
+      "webhookId": "3929fac8-dcfa-41f8-b059-08c1fc1d92c7",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Gmail - Send run report"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        3472,
+        3008
+      ],
+      "id": "5fa1dd8e-ca20-41d3-9d3a-2c711f6399e2",
+      "name": "ERROR: Gmail - Send run report",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Gmail - Send 0 order report"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1392,
+        3120
+      ],
+      "id": "38939f79-8f2f-4def-a2f5-355155c13c8e",
+      "name": "ERROR: Gmail - Send 0 order report",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Gmail - Send >100 Alert"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2464,
+        2064
+      ],
+      "id": "0785b91e-37d8-4fb9-9a5e-1cb14e446384",
+      "name": "ERROR: Gmail - Send >100 Alert",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Gmail - Send >50 Alert"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2480,
+        2336
+      ],
+      "id": "415b268f-192b-4e29-a9f3-548a3c08c1d5",
+      "name": "ERROR: Gmail - Send >50 Alert",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "content": "# WF-01 — Shopify Order Manager (Main)\n\n## Purpose\nCore ingestion and reporting pipeline for Shopify paid orders.\nPolls incrementally every 30min → writes one row per line item to a\nrotating weekly Google Sheets tab → delivers an AI-generated HTML email report.\n\n## Architecture — Two Parallel Tracks\n\n| Track | Entry point | Role |\n|-------|-------------|------|\n| A | Get actual sheet name from Redis (1st Branch) | Week rotation & sheet creation |\n| B | Get sheet name for branch2 from Redis | Order fetch, parse, write, report |\n\nBoth tracks are triggered simultaneously by the Schedule Trigger (and Manual Trigger).\nTrack A must complete before Track B writes rows — sheet existence is guaranteed\nby the parallel execution timing + Redis state.\n\n## Outputs\n1. Google Sheets row(s) — one per line item, active weekly tab\n2. AI run report email — HTML, sent via Gmail after each successful run\n3. Volume alerts — Gmail + Telegram if orders ≥ 50 or ≥ 100 in one run\n4. 0-order alert — Gmail + Telegram if Shopify returns no new orders\n\n## Error Handling\nGlobal error workflow: `gvhDaCea1oROHUrb`\nGmail send nodes: `onError: continueErrorOutput` → Telegram fallback → StopAndError\nAll Shopify/Redis/Sheets API nodes: `retryOnFail` (3 attempts, 5s delay)\n\n## Dependencies\n| Service | Credential | Usage |\n|---------|-----------|-------|\n| Redis | Docker internal | sinceId cursor, sheet name state |\n| Google Sheets | OAuth2 | ShopifyPaidOrders_Spreadsheet |\n| Shopify | OAuth2 `n8n-acess1_oauth2` | Paid orders, any status |\n| Gmail | OAuth2 | aliboussechill@gmail.com |\n| OpenRouter | API key | Grok 4 Fast (primary) / Claude Haiku 4.5 (fallback) |\n\n## Canvas Index\n→ Track A detail       : sticky \"Track A — Sheet Management\"\n→ Track B detail       : sticky \"Track B — Order Pipeline\"\n→ AI report detail     : sticky \"AI Report & Volume Alerts\"\n→ Redis keys reference : sticky \"Redis State Management\"\n→ Manual ops           : sticky \"Resets & Configuration\"\n\nAuthor: Ali Boussecsou — ali-n8n.com",
+        "height": 876,
+        "width": 920,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2832,
+        1312
+      ],
+      "id": "87bf829c-bb79-480c-9215-30fa3cda68b6",
+      "name": "WF-01 Main Doc"
+    },
+    {
+      "parameters": {
+        "content": "## Redis — State Keys Reference\n\n### shopify:sinceid\nMonotonically increasing Shopify order ID used as pagination cursor.\nEnsures incremental fetching — only orders after this ID are pulled.\n\n  GET → \"Get last sinceId\"            drives the sinceId IF branch\n  SET → \"Set max sinceId (NoTTL)\"     updated each successful run, no TTL\n  DEL → \"Reset sinceId\"               clears cursor → next run = full fetch\n\n⚠️ No TTL is intentional. Cursor survives restarts and redeploys.\n⚠️ Shopify returns max 250 orders per call. If > 250 orders arrive between\n   two runs, some will be missed. Volume alerts exist to surface this.\n⚠️ Cursor stale or corrupted → run \"Reset sinceId\" from canvas (manual only).\n\n---\n\n### shopify:sheet:name\nActive Google Sheets tab name (e.g. \"WEEK16_2026\").\nRead by both tracks independently at the start of every run.\nUpdated automatically by Track A when the ISO week rolls over.\n\n  GET (Track A) → \"Get actual sheet name from Redis (1st Branch)\"\n  GET (Track B) → \"Get sheet name for branch2 from Redis\"\n  SET           → \"Set sheet name\" — only on week_changed = true\n  SET (manual)  → \"Reset sheet_name\" — see Resets sticky",
+        "height": 468,
+        "width": 652,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -672,
+        1984
+      ],
+      "id": "eae27be2-eaaf-4ba7-a79c-d763fd425c0e",
+      "name": "Redis State Management"
+    },
+    {
+      "parameters": {
+        "content": "## Track A — Sheet Week Management\n\nRuns on every trigger in parallel with Track B.\nGoal: ensure the correct weekly tab exists before Track B writes rows.\n\n### Week format: WEEK{n}_{year}\nExamples: WEEK16_2026 / WEEK52_2026 / WEEK1_2027\n⚠️ Year follows ISO week year, NOT calendar year.\n   Week 1 of 2027 can start in late December 2026 — this is correct.\n\n### Execution flow\n1. Read stored tab name from Redis (shopify:sheet:name)\n2. Compute current ISO 8601 week — Thursday-anchored algorithm, UTC\n   Outputs: computed_name, week_changed (boolean)\n3. Is New Week?\n   FALSE → nothing to do, existing tab is used\n   TRUE  →\n     1. Create new tab in Google Sheets\n     2. Write 20-column headers (HTTP PUT → /values/{tab}!A1:T1)\n     3. Format header row (HTTP batchUpdate):\n          dark green bg / white bold text / frozen row / per-column widths\n     4. Set new tab name in Redis\n\n### Column schema A→T\ninserted_at, order_id, order_number, created_at,\ncustomer_name, customer_email, is_vip, shipping_country,\npayment_method, currency, tags, line_item_id,\nproduct_name, variant, sku, quantity,\nunit_price, total_line_price, total_discount, is_custom_item",
+        "height": 586,
+        "width": 664,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -672,
+        1328
+      ],
+      "id": "b33ccdec-e2af-44be-80ca-5e2aba3f3064",
+      "name": "Track A - Sheet Management"
+    },
+    {
+      "parameters": {
+        "content": "## Track B — Order Data Pipeline\n\n### Entry\n1. Read active sheet name from Redis (shopify:sheet:name)\n2. Read sinceId cursor from Redis (shopify:sinceid)\n3. Has sinceId?\n   YES → incremental fetch (sinceId param, up to 250 paid orders)\n   NO  → full fetch (first run or post-reset, up to 250 paid orders)\n\n### Shopify Order Parser (Code node)\nNormalizes raw Shopify payload to a typed schema.\nReference currency: shop_money (USD via price_set.shop_money).\ndisplay_currency tracks presentment currency for reference only.\nVIP detection: customer.tags includes \"VIP\" (comma-split, case-sensitive).\nCustom item flag: product_id === null.\n\n### Has Orders? (IF node)\nFALSE → 0-order alert email + Telegram → stop\nTRUE  → SplitInBatches loop (batch size: 1)\n\n⚠️ \"Get many orders with sinceId\" has alwaysOutputData: true.\n   The workflow continues with an empty payload on 0 new orders.\n   \"Has Orders?\" is the explicit guard for this path.\n\n### SplitInBatches loop\n  batching branch → Split Line Items & Sheet Row Parser → Append row → loop\n  done branch     → (parallel)\n                     • Get Max sinceId → Set max sinceId in Redis (no TTL)\n                     • Aggregate Orders for Email → AI report chain\n\n### Split Line Items & Sheet Row Parser (Code node)\nOne row per line item. Order metadata repeated on every row.\nTimestamps converted to Europe/Paris before insert.\nsheet_name injected into each row from Compute & Check Sheet Week output.",
+        "height": 670,
+        "width": 648,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -688,
+        2544
+      ],
+      "id": "7900bd03-2899-41a4-bdd9-2169ab9aace9",
+      "name": "Track B - Order Pipeline"
+    },
+    {
+      "parameters": {
+        "content": "## AI Report & Volume Alerts\n\n### Volume Alert routing\nTriggered from the done branch of SplitInBatches, in parallel with the AI report.\n\n  Count Orders → Is count_order >= 100?\n    TRUE  → Send >100 Alert (Gmail + Telegram fallback)\n    FALSE → Is count_order >= 50?\n              TRUE  → Send >50 Alert (Gmail + Telegram fallback)\n              FALSE → silent (no alert)\n\n⚠️ Threshold constant in \"Aggregate Orders for Email\" code node = 50.\n   If you change the IF thresholds here, update that constant too.\n\n### AI Email Report\n\"Aggregate Orders for Email\" computes per run:\n  orders_count, total_revenue, total_discounts,\n  vip_count, total_line_items, custom_items_count, volume_alert (nullable)\n\nAI chain:\n  Primary  → Grok 4 Fast (OpenRouter)\n  Fallback → Claude Haiku 4.5 (needsFallback: true, auto-activates on failure)\n\nPrompt uses a fixed HTML skeleton with hardcoded colors.\nAI fills real data only — no invented content, no hallucinated metrics.\nvolume_alert string passed directly to LLM when threshold is breached.\n\nOutput → \"Create subject\" (Set node) → \"Send run report\" (Gmail)\n\n### Gmail error path\nSend run report: onError: continueErrorOutput\n  branch 0 (success) → silent\n  branch 1 (failure) → Fallback Telegram — Run Report → StopAndError",
+        "height": 618,
+        "width": 800,
+        "color": 2
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2832,
+        2224
+      ],
+      "id": "75524285-b8e7-49e4-b59a-51d9b73836ac",
+      "name": "AI Report and Volume Alerts"
+    },
+    {
+      "parameters": {
+        "content": "## ⚠️ Resets & Configuration — MANUAL USE ONLY\n\nThese nodes are NOT connected to the main flow.\nExecute them individually from the canvas only when explicitly needed.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nReset sinceId\n  Deletes shopify:sinceid from Redis.\n  Effect: next run performs a full fetch (up to 250 paid orders).\n  Use when: cursor is stale, corrupted, or a full re-sync is needed.\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nReset sheet_name\n  Sets shopify:sheet:name to current ISO week name.\n  Value computed dynamically — always resolves to the correct WEEK{n}_{year}.\n  Use when: Redis key is lost, corrupted, or after a manual rollback.",
+        "height": 330,
+        "width": 1184,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1072,
+        832
+      ],
+      "id": "ec7503be-a51e-40f6-813f-e93f1f981ee5",
+      "name": "Resets and Config"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// SHEETS ROW BUILDER — One row per line item\n// Input  : Shopify Order Parser output (N orders)\n// Output : M rows (one per line item, ready for Sheets append)\n// ============================================================\n\nconst rows = [];\nconst insertedAt = new Date().toISOString();\n\nfor (const item of items) {\n  const o = item.json;\n\n  // ─── Métadonnées commande (répétées sur chaque ligne) ────\n  const orderMeta = {\n    inserted_at:     insertedAt,\n    order_id:        o.order_id,\n    order_number:    o.order_number,\n    created_at:      o.created_at,\n    customer_name:   o.customer?.full_name   || \"Guest\",   // jamais null\n    customer_email:  o.customer?.email       ?? null,\n    is_vip:          o.customer?.is_vip      ?? false,\n    shipping_country: o.shipping_address?.country_code ?? null,\n    payment_method:  (o.payment_methods || []).join(\", \") || null,\n    currency:        o.currency              ?? null,\n    tags:            o.tags                  ?? \"\",        // jamais null\n  };\n\n  // ─── Une ligne par line item ─────────────────────────────\n  for (const product of (o.products || [])) {\n    rows.push({\n      json: {\n        ...orderMeta,\n\n        // Données line item\n        line_item_id:     product.line_item_id    ?? null,\n        product_name:     product.name            ?? null,\n        variant:          product.variant         ?? null,\n        sku:              product.sku              ?? \"\",   // jamais null\n        quantity:         product.quantity        ?? null,\n        unit_price:       product.unit_price      ?? null,\n        total_line_price: product.total_line_price ?? null,\n        total_discount:   product.total_discount  ?? null,\n        is_custom_item:   product.is_custom_item  ?? false,\n      }\n    });\n  }\n}\n\nreturn rows;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        2720
+      ],
+      "id": "ec6b0de3-7257-4372-8ebd-77ed821d4c4a",
+      "name": "Split Line Items & Sheet Row Parser"
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "shopify:sheet:name",
+        "value": "={{ $('Compute & Check Sheet Week  (1st Branch)').item.json.computed_name }}",
+        "keyType": "string"
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        1840,
+        1680
+      ],
+      "id": "c544c534-7fed-4137-98e3-19355a3c9122",
+      "name": "Set sheet name",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "shopify:sheet:name",
+        "value": "=old_week",
+        "keyType": "string"
+      },
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        2016,
+        944
+      ],
+      "id": "7ea487c1-7a29-4336-b49c-c7edd7f83150",
+      "name": "Reset sheet_name",
+      "credentials": {
+        "redis": {
+          "id": "BuFsOTBtd0QMZ25S",
+          "name": "redis-container_dn0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d0f3b99c-c8de-4e0d-b9ab-46b1ccfdac78",
+              "leftValue": "={{ $json.count_order_id }}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1520,
+        2256
+      ],
+      "id": "72e19903-62c8-49bf-9fbc-c77347329a84",
+      "name": "Is count_order >= 50 ?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4738284d-04ad-4234-963e-7eaf21cecc6a",
+              "leftValue": "={{ $json.count_order_id }}",
+              "rightValue": 100,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1776,
+        2176
+      ],
+      "id": "62f86398-7861-4df2-91b2-20ca96f68896",
+      "name": "Is count_order >= 100"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io",
+          "mode": "list",
+          "cachedResultName": "ShopifyPaidOrders_Spreadsheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $('Get sheet name for branch2 from Redis').first().json.sheet_name_branch2 }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "inserted_at": "={{ DateTime.fromISO($json.inserted_at).setZone('Europe/Paris').toFormat('yyyy-MM-dd HH:mm:ss') }}",
+            "order_id": "={{ $json.order_id }}",
+            "order_number": "={{ $json.order_number }}",
+            "created_at": "={{ DateTime.fromISO($json.created_at).setZone('Europe/Paris').toFormat('yyyy-MM-dd HH:mm:ss') }}",
+            "customer_name": "={{ $json.customer_name }}",
+            "customer_email": "={{ $json.customer_email ?? '' }}",
+            "is_vip": "={{ $json.is_vip }}",
+            "shipping_country": "={{ $json.shipping_country ?? '' }}",
+            "payment_method": "={{ $json.payment_method ?? '' }}",
+            "currency": "={{ $json.currency }}",
+            "tags": "={{ $json.tags }}",
+            "line_item_id": "={{ $json.line_item_id }}",
+            "product_name": "={{ $json.product_name }}",
+            "variant": "={{ $json.variant ?? '' }}",
+            "sku": "={{ $json.sku }}",
+            "quantity": "={{ $json.quantity }}",
+            "unit_price": "={{ $json.unit_price }}",
+            "total_line_price": "={{ $json.total_line_price }}",
+            "total_discount": "={{ $json.total_discount }}",
+            "is_custom_item": "={{ $json.is_custom_item }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "inserted_at",
+              "displayName": "inserted_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_id",
+              "displayName": "order_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "order_number",
+              "displayName": "order_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "customer_name",
+              "displayName": "customer_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "customer_email",
+              "displayName": "customer_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "is_vip",
+              "displayName": "is_vip",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "shipping_country",
+              "displayName": "shipping_country",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payment_method",
+              "displayName": "payment_method",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tags",
+              "displayName": "tags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "line_item_id",
+              "displayName": "line_item_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "product_name",
+              "displayName": "product_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "variant",
+              "displayName": "variant",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sku",
+              "displayName": "sku",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "quantity",
+              "displayName": "quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "unit_price",
+              "displayName": "unit_price",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_line_price",
+              "displayName": "total_line_price",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total_discount",
+              "displayName": "total_discount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "is_custom_item",
+              "displayName": "is_custom_item",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1776,
+        2720
+      ],
+      "id": "41378715-62e0-41d8-b124-cc3fb16d0e83",
+      "name": "Append row in sheet",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZaqazKIauwPoHX4V",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## WF-01 — Meta\n\nVersion    : 1.0.0\nStatus     : stable — production\nLast update: 2026-05\nn8n version: 2.15.1\n\n### Changelog\n1.0.0 — Initial production release\n  • sinceId polling architecture (webhooks rejected)\n  • One row per line item data model\n  • ISO 8601 week rotation with Redis state\n  • AI report chain with fallback LLM\n  • Volume alerts (≥50 / ≥100 orders per run)\n  • Global error workflow + Telegram fallback on all Gmail nodes",
+        "height": 336,
+        "width": 416,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2368,
+        1312
+      ],
+      "id": "8b71b718-70bd-4579-85fd-a8b307b6b1e3",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Shopify Order Parser": {
+      "main": [
+        [
+          {
+            "node": "Count Orders",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Has Orders?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Max sinceId": {
+      "main": [
+        [
+          {
+            "node": "Set max sinceId (NoTTL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get last sinceId": {
+      "main": [
+        [
+          {
+            "node": "Has sinceId?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has sinceId?": {
+      "main": [
+        [
+          {
+            "node": "Get many orders with sinceId",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get many orders without sinceId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get many orders without sinceId": {
+      "main": [
+        [
+          {
+            "node": "Shopify Order Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get many orders with sinceId": {
+      "main": [
+        [
+          {
+            "node": "Shopify Order Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get actual sheet name from Redis (1st Branch)": {
+      "main": [
+        [
+          {
+            "node": "Compute & Check Sheet Week  (1st Branch)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute & Check Sheet Week  (1st Branch)": {
+      "main": [
+        [
+          {
+            "node": "Is New Week? (1st Branch)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is New Week? (1st Branch)": {
+      "main": [
+        [
+          {
+            "node": "Create new sheet (True Branch)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Write Headers to New Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get sheet name for branch2 from Redis": {
+      "main": [
+        [
+          {
+            "node": "Get last sinceId",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Orders for Email": {
+      "main": [
+        [
+          {
+            "node": "AI : Generate run report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Headers to New Sheet": {
+      "main": [
+        [
+          {
+            "node": "Format New Sheet Headers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI : Generate run report": {
+      "main": [
+        [
+          {
+            "node": "Create subject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create subject": {
+      "main": [
+        [
+          {
+            "node": "Send run report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger every 30min": {
+      "main": [
+        [
+          {
+            "node": "Get actual sheet name from Redis (1st Branch)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get sheet name for branch2 from Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Count Orders": {
+      "main": [
+        [
+          {
+            "node": "Is count_order >= 50 ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Haiku 4.5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI : Generate run report",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Has Orders?": {
+      "main": [
+        [
+          {
+            "node": "Split Line Items & Sheet Row Parser",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send the 0 order report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Grok 4 Fast": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI : Generate run report",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send >50 Alert": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — >50 Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send >100 Alert": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — >100 Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get actual sheet name from Redis (1st Branch)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get sheet name for branch2 from Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the 0 order report": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — 0 Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — Run Report": {
+      "main": [
+        [
+          {
+            "node": "ERROR: Gmail - Send run report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — 0 Orders": {
+      "main": [
+        [
+          {
+            "node": "ERROR: Gmail - Send 0 order report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — >50 Orders": {
+      "main": [
+        [
+          {
+            "node": "ERROR: Gmail - Send >50 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send run report": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fallback Telegram — Run Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Telegram — >100 Orders": {
+      "main": [
+        [
+          {
+            "node": "ERROR: Gmail - Send >100 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Line Items & Sheet Row Parser": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format New Sheet Headers": {
+      "main": [
+        [
+          {
+            "node": "Set sheet name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set sheet name": {
+      "main": [
+        []
+      ]
+    },
+    "Is count_order >= 50 ?": {
+      "main": [
+        [
+          {
+            "node": "Is count_order >= 100",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Is count_order >= 100": {
+      "main": [
+        [
+          {
+            "node": "Send >100 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send >50 Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Get Max sinceId",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Aggregate Orders for Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "gvhDaCea1oROHUrb",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timezone": "Africa/Casablanca"
+  },
+  "versionId": "63997dee-43e1-4f20-9778-060d31d7d62d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "037b3acb9190b403df93357c4ddaf63c7eee296648f2ce69f739438f0a280d34"
+  },
+  "id": "3Qrdrh1bUgzgURLt",
+  "tags": []
+}

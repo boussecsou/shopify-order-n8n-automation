@@ -1,0 +1,424 @@
+{
+  "name": "wf-02-weekly-sheet-controller",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtHour": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -64,
+        128
+      ],
+      "id": "01b94164-17d8-4d90-ba2c-5cbe5bce1a6b",
+      "name": "Every Week - Monday 6am"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io",
+          "mode": "list",
+          "cachedResultName": "ShopifyPaidOrders_Spreadsheet",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1FaV7qCoB9duZc4lD0LyVcT5y6dRTuimTqLYQFihJ0io/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $json.current_week_sheet }}",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        432,
+        0
+      ],
+      "id": "6e3f808d-9a71-4f7d-bf9a-836454491308",
+      "name": "Get line items from Sheet",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZaqazKIauwPoHX4V",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(r => r.json);\nconst sheetName = $('Compute Previous Week Sheet Name').first().json.current_week_sheet;\n\n// ─── Helpers ──────────────────────────────────────────────\nconst toFloat  = v => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };\nconst toInt    = v => { const n = parseInt(v);   return isNaN(n) ? 0 : n; };\nconst toBool   = v => v === true || v === 'true' || v === 'TRUE';\nconst isEmpty  = v => v === null || v === undefined || String(v).trim() === '';\n\n// ─── Extraire la semaine ISO depuis le nom de la sheet ────\n// Format attendu : WEEK16_2026\nconst sheetWeekMatch = sheetName?.match(/WEEK(\\d+)_(\\d+)/);\nconst sheetWeek = sheetWeekMatch ? parseInt(sheetWeekMatch[1]) : null;\nconst sheetYear = sheetWeekMatch ? parseInt(sheetWeekMatch[2]) : null;\n\nconst getISOWeek = (dateStr) => {\n  const d = new Date(dateStr.replace(' ', 'T'));\n  if (isNaN(d)) return null;\n  const iso = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));\n  iso.setUTCDate(iso.getUTCDate() + 4 - (iso.getUTCDay() || 7));\n  const yearStart = new Date(Date.UTC(iso.getUTCFullYear(), 0, 1));\n  return {\n    week: Math.ceil((((iso - yearStart) / 86400000) + 1) / 7),\n    year: iso.getUTCFullYear(),\n  };\n};\n\nconst PRICE_THRESHOLD = 50000;\n\n// ════════════════════════════════════════════════════════════\n// CHECK 1 — Doublons line_item_id\n// ════════════════════════════════════════════════════════════\nconst lineItemCount = {};\nfor (const row of rows) {\n  const id = String(row.line_item_id);\n  lineItemCount[id] = (lineItemCount[id] || 0) + 1;\n}\nconst duplicateLineItems = Object.entries(lineItemCount)\n  .filter(([_, c]) => c > 1)\n  .map(([id, occurrences]) => {\n    const example = rows.find(r => String(r.line_item_id) === id);\n    return {\n      line_item_id: id,\n      occurrences,\n      order_number: example?.order_number,\n      product_name: example?.product_name,\n    };\n  });\n\n// ════════════════════════════════════════════════════════════\n// CHECK 2 — Doublons order_id (commande entière dupliquée)\n// Détecte si le même order_id apparaît avec des line_item_id\n// différents mais un nombre de lignes × 2 — signe que tout\n// le run a été réécrit deux fois\n// ════════════════════════════════════════════════════════════\nconst orderLineItems = {};\nfor (const row of rows) {\n  const oid = String(row.order_id);\n  if (!orderLineItems[oid]) orderLineItems[oid] = [];\n  orderLineItems[oid].push(row.line_item_id);\n}\n\nconst duplicateOrders = [];\nfor (const [oid, lineIds] of Object.entries(orderLineItems)) {\n  const uniqueLineIds = new Set(lineIds);\n  // Si le total de lignes > unique line_item_ids → doublons dans cette commande\n  if (lineIds.length > uniqueLineIds.size) {\n    duplicateOrders.push({\n      order_id:       oid,\n      order_number:   rows.find(r => String(r.order_id) === oid)?.order_number,\n      total_rows:     lineIds.length,\n      unique_items:   uniqueLineIds.size,\n      duplicate_rows: lineIds.length - uniqueLineIds.size,\n    });\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// CHECK 3 — Cohérence financière\n// ════════════════════════════════════════════════════════════\nconst financialAnomalies = [];\n\nfor (const row of rows) {\n  const unit_price       = toFloat(row.unit_price);\n  const total_line_price = toFloat(row.total_line_price);\n  const total_discount   = toFloat(row.total_discount);\n  const quantity         = toInt(row.quantity);\n\n  // 3a. unit_price × quantity ≠ total_line_price (tolérance 0.02)\n  const expected = Math.round(unit_price * quantity * 100) / 100;\n  const actual   = Math.round(total_line_price * 100) / 100;\n  if (Math.abs(expected - actual) > 0.02) {\n    financialAnomalies.push({\n      row_number:    row.row_number,\n      order_number:  row.order_number,\n      line_item_id:  row.line_item_id,\n      product_name:  row.product_name,\n      issue:         'unit_price × quantity ≠ total_line_price',\n      expected,\n      actual,\n      diff: Math.round((actual - expected) * 100) / 100,\n    });\n  }\n\n  // 3b. Prix unitaire aberrant\n  if (unit_price > PRICE_THRESHOLD) {\n    financialAnomalies.push({\n      row_number:   row.row_number,\n      order_number: row.order_number,\n      line_item_id: row.line_item_id,\n      product_name: row.product_name,\n      issue:        `unit_price aberrant : ${unit_price}`,\n    });\n  }\n\n  // 3c. total_line_price = 0 mais unit_price > 0\n  if (total_line_price === 0 && unit_price > 0) {\n    financialAnomalies.push({\n      row_number:   row.row_number,\n      order_number: row.order_number,\n      line_item_id: row.line_item_id,\n      product_name: row.product_name,\n      issue:        'total_line_price est 0 mais unit_price > 0',\n    });\n  }\n\n  // 3d. total_discount négatif\n  if (total_discount < 0) {\n    financialAnomalies.push({\n      row_number:   row.row_number,\n      order_number: row.order_number,\n      line_item_id: row.line_item_id,\n      product_name: row.product_name,\n      issue:        `total_discount négatif : ${total_discount}`,\n    });\n  }\n\n  // 3e. quantity ≤ 0\n  if (quantity <= 0) {\n    financialAnomalies.push({\n      row_number:   row.row_number,\n      order_number: row.order_number,\n      line_item_id: row.line_item_id,\n      product_name: row.product_name,\n      issue:        `quantity invalide : ${quantity}`,\n    });\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// CHECK 4 — Données manquantes / suspectes\n// ════════════════════════════════════════════════════════════\nconst dataIssues = [];\n\nfor (const row of rows) {\n  const issues = [];\n\n  if (isEmpty(row.order_id))                      issues.push('order_id manquant');\n  if (isEmpty(row.line_item_id))                  issues.push('line_item_id manquant');\n  if (isEmpty(row.product_name))                  issues.push('product_name manquant');\n  if (isEmpty(row.order_number))                  issues.push('order_number manquant');\n  if (isEmpty(row.customer_name))                 issues.push('customer_name manquant');\n  if (isEmpty(row.shipping_country))              issues.push('shipping_country vide');\n  if (isEmpty(row.customer_email))                issues.push('customer_email vide');\n  if (isEmpty(row.payment_method))                issues.push('payment_method manquant');\n  if (isEmpty(row.currency))                      issues.push('currency manquante');\n  if (isEmpty(row.inserted_at))   issues.push('inserted_at manquant');\n\n  if (issues.length > 0) {\n    dataIssues.push({\n      row_number:    row.row_number,\n      order_number:  row.order_number  || '?',\n      customer_name: row.customer_name || '?',\n      line_item_id:  row.line_item_id  || '?',\n      product_name:  row.product_name  || '?',\n      issues,\n    });\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// CHECK 5 — Cohérence customer par order_id\n// Même order_id avec customer_name ou currency différents\n// ════════════════════════════════════════════════════════════\nconst orderMeta = {};\nconst orderInconsistencies = [];\n\nfor (const row of rows) {\n  const oid = String(row.order_id);\n  if (!orderMeta[oid]) {\n    orderMeta[oid] = {\n      customer_name: row.customer_name,\n      currency:      row.currency,\n      order_number:  row.order_number,\n    };\n  } else {\n    if (row.customer_name !== orderMeta[oid].customer_name) {\n      orderInconsistencies.push({\n        order_id:     oid,\n        order_number: row.order_number,\n        row_number:   row.row_number,\n        issue:        'customer_name incohérent sur le même order_id',\n        expected:     orderMeta[oid].customer_name,\n        found:        row.customer_name,\n      });\n    }\n    if (row.currency !== orderMeta[oid].currency) {\n      orderInconsistencies.push({\n        order_id:     oid,\n        order_number: row.order_number,\n        row_number:   row.row_number,\n        issue:        'currency incohérente sur le même order_id',\n        expected:     orderMeta[oid].currency,\n        found:        row.currency,\n      });\n    }\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// CHECK 6 — inserted_at hors fenêtre de la sheet\n// ════════════════════════════════════════════════════════════\nconst wrongWeekRows = [];\n\nif (sheetWeek && sheetYear) {\n  for (const row of rows) {\n    if (!row.inserted_at) continue;\n    const w = getISOWeek(row.inserted_at);\n    if (!w) continue;\n    if (w.week !== sheetWeek || w.year !== sheetYear) {\n      wrongWeekRows.push({\n        row_number:   row.row_number,\n        order_number: row.order_number,\n        line_item_id: row.line_item_id,\n        inserted_at:  row.inserted_at,\n        issue:        `inserted_at appartient à WEEK${w.week}_${w.year} mais est dans ${sheetName}`,\n      });\n    }\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// CHECK 7 — is_custom_item incohérent\n// is_custom_item=false mais sku ET variant vides ET product_name\n// ne ressemble pas à un produit catalogue (heuristique simple)\n// ════════════════════════════════════════════════════════════\nconst customItemInconsistencies = [];\n\nfor (const row of rows) {\n  const isCustom = toBool(row.is_custom_item);\n  const hasSku   = !isEmpty(row.sku);\n  const hasVariant = !isEmpty(row.variant);\n\n  // is_custom_item=true mais a un SKU → suspect\n  if (isCustom && hasSku) {\n    customItemInconsistencies.push({\n      row_number:   row.row_number,\n      order_number: row.order_number,\n      line_item_id: row.line_item_id,\n      product_name: row.product_name,\n      issue:        'is_custom_item=true mais SKU présent',\n    });\n  }\n}\n\n// ════════════════════════════════════════════════════════════\n// Synthèse\n// ════════════════════════════════════════════════════════════\nconst totalOrders = Object.keys(orderLineItems).length;\nconst totalRows   = rows.length;\n\nconst hasAnomalies = duplicateLineItems.length > 0\n                  || duplicateOrders.length > 0\n                  || financialAnomalies.length > 0\n                  || dataIssues.length > 0\n                  || orderInconsistencies.length > 0\n                  || wrongWeekRows.length > 0\n                  || customItemInconsistencies.length > 0;\n\nconst status = hasAnomalies ? '⚠ ANOMALIES DETECTED' : '✅ ALL CLEAR';\n\nreturn [{\n  json: {\n    sheet_name:      sheetName,\n    audit_timestamp: new Date().toISOString(),\n    status,\n    summary: {\n      total_rows:                   totalRows,\n      total_orders:                 totalOrders,\n      duplicate_line_items:         duplicateLineItems.length,\n      duplicate_orders:             duplicateOrders.length,\n      financial_anomalies:          financialAnomalies.length,\n      data_issues:                  dataIssues.length,\n      order_inconsistencies:        orderInconsistencies.length,\n      wrong_week_rows:              wrongWeekRows.length,\n      custom_item_inconsistencies:  customItemInconsistencies.length,\n    },\n    duplicateLineItems,\n    duplicateOrders,\n    financialAnomalies,\n    dataIssues,\n    orderInconsistencies,\n    wrongWeekRows,\n    customItemInconsistencies,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        0
+      ],
+      "id": "3396efa9-df21-41c8-8504-2fb4edf81ff7",
+      "name": "Weekly Sheet Quality Audit"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Generate the HTML email for this data:\n{{ JSON.stringify($json) }}",
+        "needsFallback": true,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are an HTML email generator for a weekly data quality audit report on Shopify order data.\n\nOUTPUT: Raw HTML only. No markdown, no backticks, no explanation.\n\nRULES:\n- All CSS must be inline. No <style> blocks.\n- Single column, max-width 600px, centered, font-family: Arial, sans-serif.\n- Background: #f4f4f4 outer, #ffffff inner card.\n\nSTRUCTURE — follow this order exactly:\n\n[HEADER]\n- If status is \"✅ ALL CLEAR\": dark green background (#1E3A2F), white text.\n- If status is \"⚠ ANOMALIES DETECTED\": dark red background (#7A1F1F), white text.\n- Title: \"Weekly Audit Report\"\n- Subtitle: \"Sheet: {sheet_name} · {audit_timestamp}\"\n\n[SUMMARY GRID]\n2 rows × 3 columns, thin gray borders (#e5e5e5) between cells.\nRow 1: Total rows | Total orders | Duplicate line items (red if > 0)\nRow 2: Financial anomalies (red if > 0) | Data issues (red if > 0) | Order inconsistencies (red if > 0)\nEach cell: label uppercase 11px gray, value 22px dark.\n\n[ANOMALY SECTIONS]\nOnly render a section if its array is not empty.\n\nSection \"Duplicate Line Items\" — table: line_item_id | order_number | product_name | occurrences\n\nSection \"Financial Anomalies\" — table: row | order_number | product_name | issue\n\nSection \"Data Issues\" — table: row | order_number | customer_name | product_name | issues (join with comma)\n\nSection \"Order Inconsistencies\" — table: row | order_number | issue | expected | found\n\nSection \"Wrong Week Rows\" — table: row | order_number | inserted_at | issue\n\nSection \"Custom Item Inconsistencies\" — table: row | order_number | product_name | issue\n\nEach section title: bold, 13px, dark, uppercase, with a colored left border (#E24B4A), padding 8px 12px, background #fff5f5.\nEach table: full width, font-size 12px, alternating row background (#ffffff / #f9f9f9), header row background #f0f0f0.\n\n[ALL CLEAR BLOCK]\nOnly render if all anomaly arrays are empty.\nCentered div, green text (#1D9E75), font-size 14px: \"✅ No anomalies detected this week. Data integrity confirmed.\"\n\n[FOOTER]\nCentered, muted gray (#888780), 11px.\n\"Generated automatically by ali-n8n.com\"\n\nCOLOR CONSTANTS:\nHeader OK: #1E3A2F | Header alert: #7A1F1F | Anomaly accent: #E24B4A\nAll clear: #1D9E75 | Border: #e5e5e5 | Muted: #888780"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        880,
+        0
+      ],
+      "id": "ad9dc798-69d3-4093-94a4-fd2742008332",
+      "name": "Audit Report Email Generator"
+    },
+    {
+      "parameters": {
+        "sendTo": "aliboussechill@gmail.com",
+        "subject": "={{ $('Weekly Sheet Quality Audit').first().json.status === '✅ ALL CLEAR' ? '✅' : '⚠️' }} Audit {{ $('Weekly Sheet Quality Audit').first().json.sheet_name }} — {{ $('Weekly Sheet Quality Audit').first().json.summary.financial_anomalies + $('Weekly Sheet Quality Audit').first().json.summary.data_issues + $('Weekly Sheet Quality Audit').first().json.summary.duplicate_line_items }} anomalie(s) sur {{ $('Weekly Sheet Quality Audit').first().json.summary.total_rows }} lignes · {{ $('Weekly Sheet Quality Audit').first().json.summary.total_orders }} commandes",
+        "message": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Shopify Orders Manager"
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1248,
+        0
+      ],
+      "id": "44b220b2-ec7e-4432-96bd-ea5a33163891",
+      "name": "Send audit report",
+      "webhookId": "2a611ff3-dd4b-4804-8c56-e0bb29e90f57",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OTfp8jBHESYCb1xs",
+          "name": "Gmail Credential #1"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "model": "x-ai/grok-4-fast",
+        "options": {
+          "frequencyPenalty": 0,
+          "maxTokens": 6000,
+          "responseFormat": "text",
+          "presencePenalty": 0,
+          "temperature": 0.7,
+          "timeout": 360000,
+          "maxRetries": 2,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        832,
+        192
+      ],
+      "id": "84ec874f-c75c-4c00-b013-059ea0d0d0de",
+      "name": "Grok 4 Fast",
+      "credentials": {
+        "openRouterApi": {
+          "id": "LSpFV2ns4dnMl2JY",
+          "name": "OpenRouter API Key #1"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\n\n// Reculer de 7 jours → tombe forcément dans la semaine précédente\nconst prev = new Date(Date.UTC(\n  now.getUTCFullYear(),\n  now.getUTCMonth(),\n  now.getUTCDate() - 7\n));\n\nconst iso = new Date(prev);\niso.setUTCDate(iso.getUTCDate() + 4 - (iso.getUTCDay() || 7));\nconst yearStart = new Date(Date.UTC(iso.getUTCFullYear(), 0, 1));\nconst weekNumber = Math.ceil((((iso - yearStart) / 86400000) + 1) / 7);\nconst weekYear = iso.getUTCFullYear();\n\nreturn [{ json: { current_week_sheet: `WEEK${weekNumber}_${weekYear}` } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        0
+      ],
+      "id": "871b0dfd-ae0a-4227-a51c-df935dc0c6e3",
+      "name": "Compute Previous Week Sheet Name"
+    },
+    {
+      "parameters": {
+        "model": "anthropic/claude-haiku-4.5",
+        "options": {
+          "frequencyPenalty": 0,
+          "maxTokens": 6000,
+          "responseFormat": "text",
+          "presencePenalty": 0,
+          "temperature": 0.7,
+          "timeout": 360000,
+          "maxRetries": 2,
+          "topP": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1008,
+        192
+      ],
+      "id": "a58a3456-e22a-43ed-a42e-59f957d12766",
+      "name": "Claude Haiku 4.5",
+      "credentials": {
+        "openRouterApi": {
+          "id": "LSpFV2ns4dnMl2JY",
+          "name": "OpenRouter API Key #1"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -160
+      ],
+      "id": "aceed776-90eb-4182-a0b3-6a64701ef9bf",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "Audit report custom message.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1520,
+        96
+      ],
+      "id": "029b26cc-3388-41a7-9e4e-25198eed0cd7",
+      "name": "Send audit report - Telegram",
+      "webhookId": "c594faef-e2d2-41b5-9d77-c291c601033f",
+      "credentials": {
+        "telegramApi": {
+          "id": "NrfI4hT1q05VLl6L",
+          "name": "Artificial Telegram Credential"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "errorMessage": "ERROR: Send audit report / WF-02"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1728,
+        96
+      ],
+      "id": "89546739-860c-4f12-9669-4364b9883d91",
+      "name": "ERROR: Send audit report / WF-02"
+    },
+    {
+      "parameters": {
+        "content": "# WF-02 — Weekly Sheet Quality Controller\n\n## Purpose\nWeekly automated audit of Shopify order data stored in Google Sheets.\nEvery Monday at 06:00 UTC, analyzes the previous ISO week tab and delivers\na structured HTML report via email.\n\n## Trigger\nSchedule : every Monday at 06:00 UTC\nManual   : available for on-demand testing\n\n## Execution Flow\n\n1. Compute Previous Week Sheet Name (Code)\n   Computes target tab name: WEEK{n-1}_{year} (now − 7 days, UTC).\n   ⚠️ Uses ISO week year, not calendar year.\n      Week 1 of 2027 can start in late December 2026 — this is correct.\n\n2. Get line items from Sheet (Google Sheets)\n   Reads all rows from the target tab in ShopifyPaidOrders_Spreadsheet.\n   Retry: 2 attempts, 5s apart.\n   ⚠️ If the tab does not exist, this node errors — it does not create it.\n      Tab creation is handled exclusively by WF-01 Track A.\n\n3. Weekly Sheet Quality Audit (Code)\n   → See dedicated sticky \"Audit Engine — Code Node\"\n\n4. Audit Report Email Generator (LLM Chain)\n   Sends audit JSON to LLM → returns raw inline-CSS HTML.\n   Primary  : Grok 4 Fast (OpenRouter)\n   Fallback : Claude Haiku 4.5 (needsFallback: true, auto-activates on failure)\n   Max tokens : 6000. System prompt enforces raw HTML only — no markdown, no backticks.\n   ⚠️ If anomaly arrays exceed ~100 rows, truncate before this node\n      to avoid token overflow.\n\n5. Send audit report (Gmail)\n   Sends HTML report to aliboussechill@gmail.com.\n   Subject: sheet name / total anomalies / row count / order count.\n   Retry: 2 attempts, 5s apart.\n   onError: continueErrorOutput → Telegram fallback → StopAndError\n\n## Telegram Fallback (disabled by default)\nReached only if Gmail fails.\nTo enable:\n  1. Set chatId to your real Telegram chat or group ID\n  2. Adjust message template if needed\n  3. Toggle the node ON\n⚠️ StopAndError fires regardless to surface Gmail failures in execution logs.\n\n## Error Handling\nGlobal error workflow : gvhDaCea1oROHUrb\nGmail node           : onError continueErrorOutput → Telegram → StopAndError\n\n## Dependencies\n  Redis         → shopify:sheet:name (previous week tab resolution)\n  Google Sheets → ShopifyPaidOrders_Spreadsheet\n  Gmail OAuth2  → aliboussechill@gmail.com\n  OpenRouter    → Grok 4 Fast / Claude Haiku 4.5\n\nAuthor: Ali Boussecsou — ali-n8n.com",
+        "height": 1180,
+        "width": 772,
+        "color": 4
+      },
+      "id": "d5f652fe-7283-4c11-989e-c1e12eda1504",
+      "name": "WF-02 Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1520,
+        -1136
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Meta\nVersion     : 1.0.0\nStatus      : stable — production\nLast update : 2026-05\nn8n version : 2.15.1\nDepends on  : WF-01 (tab creation), Redis (sheet name state)\n\nChangelog:\n  1.0.0 — Initial production release\n    • 7-check pure JS audit engine\n    • LLM report generation with primary/fallback chain\n    • Gmail delivery + Telegram fallback (disabled by default)\n    • ISO 8601 previous-week targeting (UTC)",
+        "height": 304,
+        "width": 416
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1056,
+        -688
+      ],
+      "id": "a71d8d7b-cd10-4dd0-a571-48fffe883950",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Audit Engine — Weekly Sheet Quality Audit\n\nPure JS code node. Zero external dependencies.\nInput  : all rows from the target weekly tab\nOutput : single JSON object\n\nOutput schema:\n  status          → \"ALL CLEAR\" | \"ANOMALIES DETECTED\"\n  summary         → { check_name: flagged_count, ... } for all 7 checks\n  [per-category]  → array of flagged rows with context fields\n\n## 7 Checks\n\n┌───┬──────────────────────────────┬──────────────────────────────────────────┐\n│ # │ Check                        │ Flag condition                           │\n├───┼──────────────────────────────┼──────────────────────────────────────────┤\n│ 1 │ Duplicate line_item_id       │ Same ID appears more than once           │\n│ 2 │ Duplicate order_id           │ Full order written more than once        │\n│ 3 │ Financial consistency        │ unit_price × qty ≠ total_line_price      │\n│   │                              │ tolerance ±0.02 (Shopify float rounding) │\n│ 4 │ Missing critical fields      │ Empty values in required columns         │\n│ 5 │ Customer consistency         │ Conflicting metadata within same order   │\n│ 6 │ Date out of window           │ inserted_at outside expected ISO week    │\n│ 7 │ is_custom_item vs SKU        │ Custom flag inconsistent with SKU value  │\n└───┴──────────────────────────────┴──────────────────────────────────────────┘\n\n## Tuneable Constants\n  PRICE_THRESHOLD = 50000\n    Flags unit_price above this value as a financial anomaly.\n    Adjust if your catalogue includes legitimate high-ticket items.\n\n  Price math tolerance = ±0.02\n    Covers Shopify float rounding on line totals.\n    Do not reduce — will produce false positives.",
+        "height": 704,
+        "width": 816,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -784
+      ],
+      "id": "8a3bdfb0-1524-4275-8875-917e74a97b42",
+      "name": "Sticky Note1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every Week - Monday 6am": {
+      "main": [
+        [
+          {
+            "node": "Compute Previous Week Sheet Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get line items from Sheet": {
+      "main": [
+        [
+          {
+            "node": "Weekly Sheet Quality Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Sheet Quality Audit": {
+      "main": [
+        [
+          {
+            "node": "Audit Report Email Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Report Email Generator": {
+      "main": [
+        [
+          {
+            "node": "Send audit report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Grok 4 Fast": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Audit Report Email Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Previous Week Sheet Name": {
+      "main": [
+        [
+          {
+            "node": "Get line items from Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Haiku 4.5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Audit Report Email Generator",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Compute Previous Week Sheet Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send audit report": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Send audit report - Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send audit report - Telegram": {
+      "main": [
+        [
+          {
+            "node": "ERROR: Send audit report / WF-02",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "gvhDaCea1oROHUrb",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "timezone": "Africa/Casablanca",
+    "timeSavedPerExecution": 10
+  },
+  "versionId": "4986a03d-1023-44d2-8546-09e9a58f58ca",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "037b3acb9190b403df93357c4ddaf63c7eee296648f2ce69f739438f0a280d34"
+  },
+  "id": "6ClEV0VLfau95Zqk",
+  "tags": []
+}
