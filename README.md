@@ -230,7 +230,6 @@ shopify-order-n8n-automation/
 ---
 
 <img width="1280" height="380" alt="README_FAQBanner" src="https://github.com/user-attachments/assets/614c2b29-ad09-463d-95bb-b27df376696e" />
----
 
 ## Frequently Asked Questions
 
