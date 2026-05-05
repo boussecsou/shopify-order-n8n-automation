@@ -7,7 +7,9 @@
 #   n8n       — automation engine (Enterprise)
 #   redis     — state management (sinceId cursor, sheet name)
 #
-# All services run on the same bridge network (n8n_network).
+# Networks:
+#   public_net   — caddy + n8n (proxy traffic)
+#   internal_net — n8n + redis only (never reachable from caddy)
 # No service ports are exposed directly except through Caddy.
 # ============================================================
 
@@ -15,10 +17,8 @@ services:
 
   # ── CADDY ────────────────────────────────────────────────
   caddy:
-    image: caddy:latest
+    image: caddy:2.9
     container_name: caddy-proxy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: always
     ports:
       - "80:80"
@@ -28,7 +28,7 @@ services:
       - ./caddy_data:/data
       - ./caddy_config:/config
     networks:
-      - n8n_network
+      - public_net
     logging:
       driver: "json-file"
       options:
@@ -65,7 +65,8 @@ services:
       - ./n8n_data:/home/node/.n8n
       - /home/adlin/metrics:/data/metrics:ro     # VPS metrics — read-only
     networks:
-      - n8n_network
+      - public_net
+      - internal_net
     logging:
       driver: "json-file"
       options:
@@ -77,8 +78,6 @@ services:
     image: redis:7-alpine
     container_name: redis-container
     restart: always
-    networks:
-      - n8n_network
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
@@ -87,8 +86,13 @@ services:
       --maxmemory-policy allkeys-lru
     volumes:
       - /root/n8n-automation/redis_data:/data
+    networks:
+      - internal_net
 
-# ── NETWORK ───────────────────────────────────────────────
+# ── NETWORKS ──────────────────────────────────────────────
 networks:
-  n8n_network:
+  public_net:
     driver: bridge
+  internal_net:
+    driver: bridge
+    internal: true
