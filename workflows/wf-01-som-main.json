@@ -129,7 +129,7 @@
       "parameters": {
         "authentication": "oAuth2",
         "operation": "getAll",
-        "limit": 3,
+        "limit": 250,
         "options": {
           "financialStatus": "paid",
           "fulfillmentStatus": "any",
@@ -157,7 +157,7 @@
       "parameters": {
         "authentication": "oAuth2",
         "operation": "getAll",
-        "limit": 3,
+        "limit": 250,
         "options": {
           "financialStatus": "paid",
           "fulfillmentStatus": "any",
