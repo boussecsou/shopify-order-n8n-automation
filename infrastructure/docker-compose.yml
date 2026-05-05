@@ -17,7 +17,7 @@ services:
 
   # ── CADDY ────────────────────────────────────────────────
   caddy:
-    image: caddy:2.9
+    image: caddy:2.11
     container_name: caddy-proxy
     restart: always
     ports:
