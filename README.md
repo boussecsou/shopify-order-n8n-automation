@@ -9,7 +9,6 @@
 Automated Shopify paid order pipeline - self-hosted n8n, Redis state management, weekly Google Sheets rotation, AI-generated reports, and infrastructure monitoring. Production-grade.
 
 <img width="1280" height="380" alt="README_WelcomeBanner" src="https://github.com/user-attachments/assets/353e6872-aa64-42c2-b239-84fd06f48b21" />
-
 ---
 
 ## What This Is
@@ -22,7 +21,10 @@ monitors the VPS infrastructure daily.
 
 Built as a publishable technical reference — not a prototype.
 
-📄 **[System Architecture & Engineering Showcase (PDF)](./LOOKME.pdf)**
+> 🎯 **Want the full picture before diving in?**
+> Visit **[LOOKME.md](./LOOKME.md)** for the visual showcase
+> or download the **[10-page PDF](./docs/LOOKME.pdf)** — architecture diagrams,
+> annotated workflow canvases, engineering decisions, and skills matrix.
 
 ---
 
@@ -174,23 +176,25 @@ docker compose -f infrastructure/docker-compose.yml up -d
 
 ```
 shopify-order-n8n-automation/
-├── LOOKME.pdf                        # Visual system showcase (10 pages)
 ├── README.md
+├── LOOKME.md                         # Visual showcase page — start here
+├── clickSTAR.md                      # If this project helped you — visit this ⭐
 ├── LICENSE
 │
-├── workflows/
-│   ├── wf-01-som-main.json
-│   ├── wf-02-weekly-sheet-controller.json
-│   ├── wf-03-error-handler.json
-│   └── wf-04-vps-ai-monitoring.json
-│
 ├── docs/
+│   ├── LOOKME.pdf                    # Full 10-page system showcase (download)
 │   ├── WF-01_SOM_Main.md
 │   ├── WF-02_WeeklyController.md
 │   ├── WF-03_ErrorHandler.md
 │   ├── WF-04_VPS_Monitoring.md
 │   ├── DEPLOYMENT.md
 │   └── SECURITY.md
+│
+├── workflows/
+│   ├── wf-01-som-main.json
+│   ├── wf-02-weekly-sheet-controller.json
+│   ├── wf-03-error-handler.json
+│   └── wf-04-vps-ai-monitoring.json
 │
 ├── infrastructure/
 │   ├── docker-compose.yml
@@ -219,15 +223,15 @@ shopify-order-n8n-automation/
 
 | Document | Description |
 |---|---|
-| [LOOKME.pdf](./LOOKME.pdf) | Full visual system showcase — start here |
+| [LOOKME.md](./LOOKME.md) | Visual showcase — architecture, workflows, skills matrix |
+| [docs/LOOKME.pdf](./docs/LOOKME.pdf) | Download the full 10-page PDF showcase |
 | [WF-01 — SOM Main](./docs/WF-01_SOM_Main.md) | Core pipeline deep-dive |
 | [WF-02 — Weekly Controller](./docs/WF-02_WeeklyController.md) | Data quality audit |
 | [WF-03 — Error Handler](./docs/WF-03_ErrorHandler.md) | Centralized error routing |
 | [WF-04 — VPS Monitoring](./docs/WF-04_VPS_Monitoring.md) | Infrastructure monitoring |
 | [Deployment Guide](./docs/DEPLOYMENT.md) | Full VPS setup from scratch |
 | [Security](./docs/SECURITY.md) | Security posture and hardening |
-
----
+| [clickSTAR.md](./clickSTAR.md) | If this project helped you — visit this ⭐ |
 
 <img width="1280" height="380" alt="README_FAQBanner" src="https://github.com/user-attachments/assets/614c2b29-ad09-463d-95bb-b27df376696e" />
 
