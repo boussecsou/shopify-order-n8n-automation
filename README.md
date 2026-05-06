@@ -1,6 +1,6 @@
 # shopify-order-n8n-automation
 
-Automated Shopify paid order pipeline - self-hosted n8n, Redis state management, weekly Google Sheets rotation, AI-generated reports, and infrastructure monitoring. Production-grade.
+Polling-based Shopify order reporting pipeline (30-min cadence, not real-time) — self-hosted n8n, Redis state management, weekly Google Sheets rotation, AI-generated reports, and infrastructure monitoring. Production-grade.
 
 <img width="1280" height="380" alt="README_WelcomeBanner" src="https://github.com/user-attachments/assets/353e6872-aa64-42c2-b239-84fd06f48b21" />
 
@@ -21,6 +21,8 @@ AI-formatted HTML email report, audits its own data quality every Monday, and
 monitors the VPS infrastructure daily.
 
 Built as a publishable technical reference — not a prototype.
+
+> **This is a reporting system, not a real-time tracker.** Orders appear in the sheet within 30 minutes of payment — by design.
 
 > 🎯 **Want the full picture before diving in?**
 > Visit **[LOOKME.md](./LOOKME.md)** for the visual showcase
